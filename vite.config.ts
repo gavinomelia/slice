@@ -4,4 +4,5 @@ import { defineConfig } from 'vite'
 export default defineConfig({
   plugins: [sveltekit()],
   server: { port: 5273 },
+  ssr: { noExternal: ['@lucide/svelte'] },
 })

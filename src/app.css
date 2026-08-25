@@ -1,5 +1,6 @@
 :root {
   --bg: #0e1013;
+  color-scheme: dark;
   --bg-raised: #15181d;
   --bg-inset: #0a0c0e;
   --bg-hover: #1d2127;
@@ -36,6 +37,7 @@ html,
 body {
   margin: 0;
   height: 100%;
+  overflow: hidden;
   background: var(--bg);
   color: var(--text);
   font-family: var(--sans);
@@ -51,8 +53,25 @@ button {
   cursor: pointer;
 }
 
+button:disabled {
+  cursor: not-allowed;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 a {
   color: var(--accent);
+}
+
+::selection {
+  background: var(--accent-dim);
+  color: var(--text);
 }
 
 ::-webkit-scrollbar {

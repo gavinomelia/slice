@@ -96,6 +96,13 @@ src/lib/            viewer state, types, components
 src/routes/         page + the review-posting endpoint
 ```
 
+## Appearance
+
+Open **Appearance** in the viewer toolbar to customize diff layout, highlighting,
+font size, tree density, tree width, and tree colors. Settings persist in the
+current browser. The Advanced CSS section accepts CSS injected into each
+library's shadow root for styling beyond the built-in controls.
+
 Artifacts are cached in `~/.cache/pr-review/<repo>/`, outside the repo, so
 reviewing never dirties your working tree. Re-run with `--refresh` to redo the
 analysis, or `--no-analyze` to just browse the diff.

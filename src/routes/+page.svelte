@@ -1,11 +1,23 @@
 <script lang="ts">
+  import CircleHelp from '@lucide/svelte/icons/circle-help'
+  import Eye from '@lucide/svelte/icons/eye'
+  import EyeOff from '@lucide/svelte/icons/eye-off'
+  import Settings2 from '@lucide/svelte/icons/settings-2'
+  import { onMount } from 'svelte'
   import AnalysisPanel from '$lib/components/AnalysisPanel.svelte'
+  import AppearancePanel from '$lib/components/AppearancePanel.svelte'
   import CommentsPanel from '$lib/components/CommentsPanel.svelte'
   import DiffFile from '$lib/components/DiffFile.svelte'
   import SliceTree from '$lib/components/SliceTree.svelte'
   import TriagePanel from '$lib/components/TriagePanel.svelte'
   import { ReviewSession } from '$lib/state.svelte'
   import { SEVERITY_META, SEVERITY_ORDER } from '$lib/types'
+  import {
+    DEFAULT_VIEWER_APPEARANCE,
+    loadViewerAppearance,
+    saveViewerAppearance,
+  } from '$lib/viewerAppearance'
+  import type { ViewerAppearance } from '$lib/viewerAppearance'
   import type { PageData } from './$types'
 
   let { data }: { data: PageData } = $props()
@@ -15,7 +27,11 @@
 
   let diffStyle = $state<'split' | 'unified'>('split')
   let showHelp = $state(false)
+  let showAppearance = $state(false)
   let refs = $state<Record<string, DiffFile | undefined>>({})
+  let appearance = $state<ViewerAppearance>({ ...DEFAULT_VIEWER_APPEARANCE })
+  let appearanceReady = $state(false)
+  let treeResizeStart: { x: number; width: number } | null = null
 
   const paths = $derived(session.visiblePaths)
   const progress = $derived(session.overallProgress)
@@ -50,9 +66,53 @@
     if (next.line) requestAnimationFrame(() => refs[next.path]?.revealLine(next.line as number))
   }
 
+  function isTyping(event: KeyboardEvent) {
+    return event.composedPath().some(
+      (target) =>
+        target instanceof HTMLElement &&
+        (target.matches('input, textarea, select, [role="textbox"]') || target.isContentEditable),
+    )
+  }
+
+  function clampTreeWidth(width: number) {
+    return Math.min(420, Math.max(190, width))
+  }
+
+  function beginTreeResize(event: PointerEvent) {
+    if (event.button !== 0) return
+    treeResizeStart = { x: event.clientX, width: appearance.treeWidth }
+    ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
+    event.preventDefault()
+  }
+
+  function resizeTree(event: PointerEvent) {
+    if (!treeResizeStart) return
+    updateAppearance({ treeWidth: clampTreeWidth(treeResizeStart.width + event.clientX - treeResizeStart.x) })
+  }
+
+  function endTreeResize(event: PointerEvent) {
+    treeResizeStart = null
+    const handle = event.currentTarget as HTMLElement
+    if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId)
+  }
+
+  function resizeTreeWithKeyboard(event: KeyboardEvent) {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+    const direction = event.key === 'ArrowLeft' ? -1 : 1
+    updateAppearance({ treeWidth: clampTreeWidth(appearance.treeWidth + direction * (event.shiftKey ? 32 : 16)) })
+    event.preventDefault()
+  }
+
+  function updateAppearance(patch: Partial<ViewerAppearance>) {
+    appearance = { ...appearance, ...patch }
+  }
+
+  function resetAppearance() {
+    appearance = { ...DEFAULT_VIEWER_APPEARANCE }
+  }
+
   function onKeydown(event: KeyboardEvent) {
-    const el = event.target as HTMLElement
-    if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' || el.isContentEditable) return
+    if (isTyping(event)) return
     if (event.metaKey || event.ctrlKey || event.altKey) return
 
     switch (event.key) {
@@ -97,6 +157,7 @@
         break
       case 'Escape':
         showHelp = false
+        showAppearance = false
         break
       default:
         return
@@ -106,6 +167,15 @@
 
   $effect(() => {
     refs[session.activePath]?.scrollIntoView()
+  })
+
+  $effect(() => {
+    if (appearanceReady) saveViewerAppearance(appearance)
+  })
+
+  onMount(() => {
+    appearance = loadViewerAppearance()
+    appearanceReady = true
   })
 </script>
 
@@ -141,22 +211,70 @@
     {/each}
   </div>
 
-  <div class="progress" title="{progress.done} of {progress.total} files reviewed">
+  <div
+    class="progress"
+    role="progressbar"
+    aria-label="Files reviewed"
+    aria-valuemin="0"
+    aria-valuemax={progress.total}
+    aria-valuenow={progress.done}
+    title="{progress.done} of {progress.total} files reviewed"
+  >
     <div class="bar"><div class="fill" style="width: {(progress.done / Math.max(1, progress.total)) * 100}%"></div></div>
     <span class="mono">{progress.done}/{progress.total}</span>
   </div>
 
   <div class="tools">
-    <button class:on={session.hideReviewed} onclick={() => (session.hideReviewed = !session.hideReviewed)}>
-      hide done
+    <button
+      class="icon-tool hide-reviewed"
+      class:on={session.hideReviewed}
+      aria-pressed={session.hideReviewed}
+      aria-label={session.hideReviewed ? 'Show reviewed files' : 'Hide reviewed files'}
+      title={session.hideReviewed ? 'Show reviewed files (h)' : 'Hide reviewed files (h)'}
+      onclick={() => (session.hideReviewed = !session.hideReviewed)}
+    >
+      {#if session.hideReviewed}<Eye size={15} strokeWidth={1.8} />{:else}<EyeOff size={15} strokeWidth={1.8} />{/if}
     </button>
-    <button onclick={() => (diffStyle = diffStyle === 'split' ? 'unified' : 'split')}>{diffStyle}</button>
-    <button onclick={() => (showHelp = !showHelp)}>?</button>
+    <div class="mode" role="group" aria-label="Diff layout">
+      <button class:on={diffStyle === 'split'} aria-pressed={diffStyle === 'split'} onclick={() => (diffStyle = 'split')}>
+        Split
+      </button>
+      <button class:on={diffStyle === 'unified'} aria-pressed={diffStyle === 'unified'} onclick={() => (diffStyle = 'unified')}>
+        Unified
+      </button>
+    </div>
+    <button
+      class="icon-tool"
+      aria-label="Keyboard shortcuts"
+      aria-expanded={showHelp}
+      title="Keyboard shortcuts (?)"
+      onclick={() => (showHelp = !showHelp)}><CircleHelp size={15} strokeWidth={1.8} /></button>
+    <button
+      class="icon-tool"
+      class:on={showAppearance}
+      aria-pressed={showAppearance}
+      aria-label="Appearance settings"
+      title="Appearance settings"
+      onclick={() => (showAppearance = !showAppearance)}
+    >
+      <Settings2 size={15} strokeWidth={1.8} />
+    </button>
   </div>
 </header>
 
-<div class="cols">
-  <aside class="left"><SliceTree {session} /></aside>
+<div class="cols" style="--tree-width: {appearance.treeWidth}px">
+  <aside class="left">
+    <SliceTree {session} {appearance} />
+    <button
+      class="tree-resizer"
+      aria-label="Resize file tree, currently {appearance.treeWidth} pixels wide"
+      onpointerdown={beginTreeResize}
+      onpointermove={resizeTree}
+      onpointerup={endTreeResize}
+      onpointercancel={endTreeResize}
+      onkeydown={resizeTreeWithKeyboard}
+    ></button>
+  </aside>
 
   <main class="center scroll">
     {#if session.activeSlice}
@@ -171,7 +289,7 @@
 
     {#each paths as path (path)}
       {#if session.review.files[path]}
-        <DiffFile bind:this={refs[path]} file={session.review.files[path]} {session} {diffStyle} />
+        <DiffFile bind:this={refs[path]} file={session.review.files[path]} {session} {diffStyle} {appearance} />
       {/if}
     {/each}
 
@@ -182,12 +300,12 @@
 
   <aside class="right">
     <nav class="tabs">
-      <button class:on={session.panel === 'analysis'} onclick={() => (session.panel = 'analysis')}>Analysis</button>
-      <button class:on={session.panel === 'findings'} onclick={() => (session.panel = 'findings')}>
+      <button aria-pressed={session.panel === 'analysis'} class:on={session.panel === 'analysis'} onclick={() => (session.panel = 'analysis')}>Analysis</button>
+      <button aria-pressed={session.panel === 'findings'} class:on={session.panel === 'findings'} onclick={() => (session.panel = 'findings')}>
         Findings
         {#if session.liveFindings.length}<span class="badge">{session.liveFindings.length}</span>{/if}
       </button>
-      <button class:on={session.panel === 'comments'} onclick={() => (session.panel = 'comments')}>
+      <button aria-pressed={session.panel === 'comments'} class:on={session.panel === 'comments'} onclick={() => (session.panel = 'comments')}>
         Comments
         {#if session.drafts.length}<span class="badge">{session.drafts.length}</span>{/if}
       </button>
@@ -205,18 +323,27 @@
 
 {#if showHelp}
   <button class="scrim" onclick={() => (showHelp = false)} aria-label="Close help"></button>
-  <div class="help">
-    <h3>Keys</h3>
+  <div class="help" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
+    <h3 id="shortcuts-title">Keyboard shortcuts</h3>
     <dl>
       <div><kbd>j</kbd><kbd>k</kbd><span>file down / up</span></div>
       <div><kbd>[</kbd><kbd>]</kbd><span>previous / next slice</span></div>
       <div><kbd>n</kbd><kbd>p</kbd><span>next / previous finding</span></div>
-      <div><kbd>r</kbd><span>mark current file reviewed</span></div>
+      <div><kbd>r</kbd><span>toggle reviewed and collapse</span></div>
       <div><kbd>h</kbd><span>hide reviewed files</span></div>
       <div><kbd>d</kbd><span>split / unified diff</span></div>
       <div><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd><span>analysis / findings / comments</span></div>
     </dl>
   </div>
+{/if}
+
+{#if showAppearance}
+  <AppearancePanel
+    {appearance}
+    onChange={updateAppearance}
+    onReset={resetAppearance}
+    onClose={() => (showAppearance = false)}
+  />
 {/if}
 
 <style>
@@ -228,6 +355,9 @@
     padding: 0 14px;
     border-bottom: 1px solid var(--border);
     background: var(--bg-raised);
+    position: relative;
+    z-index: 10;
+    box-shadow: 0 1px 8px rgb(0 0 0 / 18%);
   }
 
   .title {
@@ -290,25 +420,60 @@
 
   .tools {
     display: flex;
+    align-items: center;
     gap: 4px;
   }
 
   .tools button {
-    padding: 3px 8px;
+    min-height: 28px;
+    padding: 4px 9px;
     border: 1px solid var(--border-strong);
     border-radius: 4px;
     font-size: 11px;
     color: var(--text-muted);
+    transition: color 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
+  }
+
+  .tools button:hover {
+    color: var(--text);
+    border-color: var(--text-faint);
   }
 
   .tools button.on {
-    border-color: var(--accent);
-    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
+    background: color-mix(in srgb, var(--accent-dim) 55%, transparent);
+    color: var(--text);
+  }
+
+  .mode {
+    display: flex;
+    padding: 2px;
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    background: var(--bg-inset);
+  }
+
+  .mode button {
+    min-height: 22px;
+    border: 0;
+    padding: 2px 7px;
+  }
+
+  .mode button.on {
+    background: var(--bg-hover);
+    color: var(--text);
+  }
+
+  .icon-tool {
+    display: grid;
+    place-items: center;
+    width: 28px;
+    padding-inline: 0 !important;
   }
 
   .cols {
     display: grid;
-    grid-template-columns: 270px minmax(0, 1fr) 380px;
+    grid-template-columns: var(--tree-width) minmax(0, 1fr) clamp(320px, 25vw, 380px);
     height: calc(100vh - var(--header-h));
   }
 
@@ -316,11 +481,42 @@
     border-right: 1px solid var(--border);
     background: var(--bg-raised);
     overflow: hidden;
+    position: relative;
+  }
+
+  .tree-resizer {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 4;
+    width: 8px;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    cursor: col-resize;
+    touch-action: none;
+  }
+
+  .tree-resizer::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    right: 3px;
+    bottom: 0;
+    width: 1px;
+    background: transparent;
+    transition: background-color 0.15s ease;
+  }
+
+  .tree-resizer:hover::after,
+  .tree-resizer:focus-visible::after {
+    background: var(--accent);
   }
 
   .center {
-    padding: 14px;
-    background: var(--bg);
+    padding: 16px;
+    background: linear-gradient(180deg, color-mix(in srgb, var(--bg-raised) 35%, var(--bg)) 0, var(--bg) 150px);
   }
 
   .right {
@@ -334,6 +530,7 @@
   .tabs {
     display: flex;
     border-bottom: 1px solid var(--border);
+    background: var(--bg-inset);
   }
 
   .tabs button {
@@ -342,6 +539,12 @@
     font-size: 11.5px;
     color: var(--text-faint);
     border-bottom: 2px solid transparent;
+    transition: color 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
+  }
+
+  .tabs button:hover {
+    color: var(--text-muted);
+    background: var(--bg-hover);
   }
 
   .tabs button.on {
@@ -416,6 +619,8 @@
     border-radius: 8px;
     padding: 16px 20px;
     min-width: 300px;
+    z-index: 20;
+    box-shadow: 0 18px 48px rgb(0 0 0 / 45%);
   }
 
   .help h3 {
@@ -453,5 +658,61 @@
     border-radius: 3px;
     background: var(--bg-inset);
     color: var(--text);
+  }
+
+  @media (max-width: 1100px) {
+    .totals {
+      display: none;
+    }
+  }
+
+  @media (max-width: 860px) {
+    .cols {
+      grid-template-columns: minmax(0, 1fr) 330px;
+    }
+
+    .left {
+      display: none;
+    }
+
+    .meta .dim:last-child,
+    .meta .mono:last-child {
+      display: none;
+    }
+  }
+
+  @media (max-width: 680px) {
+    .top {
+      gap: 8px;
+      padding-inline: 10px;
+    }
+
+    .meta,
+    .progress,
+    .hide-reviewed {
+      display: none;
+    }
+
+    .cols {
+      grid-template-columns: 1fr;
+      grid-template-rows: minmax(52%, 1fr) minmax(280px, 42%);
+    }
+
+    .center {
+      padding: 10px;
+    }
+
+    .right {
+      border-top: 1px solid var(--border);
+      border-left: 0;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .fill,
+    .tools button,
+    .tabs button {
+      transition: none;
+    }
   }
 </style>

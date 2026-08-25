@@ -3,8 +3,10 @@
   import type { ReviewSession } from '$lib/state.svelte'
   import { buildSliceTree } from '$lib/slicePaths'
   import { SEVERITY_META, SEVERITY_ORDER } from '$lib/types'
+  import { treeAppearanceOptions } from '$lib/viewerAppearance'
+  import type { ViewerAppearance } from '$lib/viewerAppearance'
 
-  let { session }: { session: ReviewSession } = $props()
+  let { session, appearance }: { session: ReviewSession; appearance: ViewerAppearance } = $props()
 
   let host = $state<HTMLDivElement | null>(null)
   let tree: FileTree | null = null
@@ -17,6 +19,7 @@
   const decorationKey = $derived(
     JSON.stringify([Object.keys(session.reviewed).filter((p) => session.reviewed[p]).sort(), Object.keys(session.dismissed).sort()]),
   )
+  const appearanceKey = $derived(JSON.stringify(appearance))
 
   function statusFor(path: string) {
     const status = session.review.files[path]?.status
@@ -34,13 +37,13 @@
     host.replaceChildren()
 
     tree = new FileTree({
+      ...treeAppearanceOptions(appearance),
       preparedInput: preparePresortedFileTreeInput(map.paths),
       presorted: true,
       flattenEmptyDirectories: true,
       initialExpansion: 'open',
       initialSelectedPaths: session.activePath ? [map.treePathByFile.get(session.activePath) ?? ''] : [],
       search: true,
-      density: 'compact',
       gitStatus: map.paths.map((treePath) => ({
         path: treePath,
         status: statusFor(map.fileByTreePath.get(treePath) ?? ''),
@@ -83,6 +86,7 @@
     // Referenced so the effect re-runs when either changes.
     void map
     void decorationKey
+    void appearanceKey
     build()
     return () => {
       tree?.unmount()
