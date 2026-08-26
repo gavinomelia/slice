@@ -3,16 +3,26 @@
  * can read callers, conventions, and sibling implementations — context a bare
  * API call against the diff alone would not have.
  */
-export function analysisPrompt({ patchPath, filesPath, target, hasConventions }) {
-  const conventions = hasConventions
+export function analysisPrompt({ patchPath, filesPath, target, conventionFiles = [] }) {
+  const conventions = conventionFiles.length
     ? `
 ## Project conventions
 
-This repo documents its own conventions in \`docs/CONVENTIONS.md\`, with an index
-of files and the path globs each applies to. Before judging a file, read the
-convention entries whose globs match it. Cite the convention by name in the
-finding. A generic best practice asserted against a project that documents the
-opposite is worse than saying nothing.
+This repo states the standards this change must be judged against:
+
+${conventionFiles.map((path) => `- \`${path}\``).join('\n')}
+
+Read all of them before judging any file — first, before forming an opinion.
+
+Treat them as indexes as well as content: an entry carrying a path glob or a
+\`<!-- paths: ... -->\` comment points at a further file, and you must open the
+ones whose paths match files in this diff rather than reviewing off the one-line
+summary. Where an instruction file names conventions that are violated often,
+check those specifically against this diff.
+
+Cite the convention by name in the finding, and prefer a finding grounded in a
+documented convention over a generic one. A best practice asserted against a
+project that documents the opposite is worse than saying nothing.
 `
     : ''
 
@@ -66,15 +76,39 @@ Everything else is \`kind: "behavior"\`.
 
 ## Step 2: Write summaries
 
-- \`overview.intent\` — what this change sets out to do, in one or two
-  sentences, based on the diff and the PR description.
+**Lead with the user flow, then the mechanism.** Every summary opens by walking
+through what a person using the app does and sees — where they start, what they
+click, what is different for them afterwards — in the order they experience it.
+Only once that is established do you explain how the code delivers it.
+
+A reviewer who does not yet know what the feature *is* cannot judge whether the
+implementation is right. Opening on class names, modules, or file structure
+forces them to reverse-engineer the intent from the diff, which is the work the
+walkthrough exists to save them.
+
+So: no class, module, table, or method name may appear before you have
+described the behavior in plain language. Write for someone who has used the
+app but has not seen this code.
+
+If a slice genuinely has no user-visible effect — a refactor, a base class, a
+migration that changes no behavior yet — say that plainly in the first
+sentence, then say what it unblocks or protects. Do not invent a user story for
+it, and do not stretch to frame plumbing as a feature.
+
+- \`overview.intent\` — the user-facing story first: who does what, and what is
+  different for them afterwards. Two or three sentences walking the flow. Then
+  at most one sentence on the overall shape of the change. Base it on the diff
+  and the PR description.
 - \`overview.assessment\` — your verdict, one short paragraph: is it sound, and
   what is the single most important thing to change.
 - \`overview.risk\` — "low", "medium", or "high".
-- \`slices[].summary\` — what this slice does and how its files fit together.
-  Two or three sentences. Explain the mechanism, do not list the files.
+- \`slices[].summary\` — open with the part of the flow this slice delivers,
+  described from the user's side. Then the mechanism: how these files work
+  together to produce it, and anything load-bearing a reviewer would otherwise
+  have to infer. Three or four sentences. Never list the files.
 - \`notes[]\` — one entry per file, \`summary\` being a single sentence on what
-  changed in it and why. Skip files in a "skim" slice.
+  changed in it and why. These sit beside the file's diff, so they are the one
+  place to be concretely technical. Skip files in a "skim" slice.
 
 Never narrate the diff line by line. The viewer shows the diff next to your
 text; restating it wastes the reader's attention.

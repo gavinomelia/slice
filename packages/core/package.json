@@ -1,0 +1,18 @@
+{
+  "name": "@pr-review/core",
+  "version": "1.0.0",
+  "description": "Resolve a PR or branch, capture its patch, run the analysis, hand a review.json to a viewer",
+  "type": "module",
+  "bin": { "pr-review": "./bin/pr-review.mjs" },
+  "exports": {
+    "./patch": "./lib/patch.mjs",
+    "./merge": "./lib/merge.mjs",
+    "./prompt": "./lib/prompt.mjs",
+    "./package.json": "./package.json"
+  },
+  "dependencies": {
+    "@pr-review/tui": "*",
+    "@pr-review/web": "*"
+  },
+  "license": "ISC"
+}

@@ -1,15 +1,20 @@
 #!/usr/bin/env node
 import { execFileSync, spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
 
 import { splitPatch } from '../lib/patch.mjs'
 import { bareReview, mergeReview } from '../lib/merge.mjs'
 import { analysisPrompt } from '../lib/prompt.mjs'
 
-const APP_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+// The viewers are sibling workspace packages, resolved through node rather
+// than by walking relative paths, so moving this file cannot silently break
+// the handoff to either one.
+const require = createRequire(import.meta.url)
+const TUI_BIN = require.resolve('@pr-review/tui')
+const WEB_DIR = dirname(require.resolve('@pr-review/web/package.json'))
 
 const USAGE = `
 pr-review — slice-grouped PR review with AI analysis alongside the diff
@@ -26,7 +31,8 @@ Options:
   --base <ref>      base ref for --branch mode (default: the repo default branch)
   --refresh         re-run the analysis even if a cached one exists
   --no-analyze      skip the analysis; open the viewer with the diff only
-  --port <n>        dev server port (default 5273)
+  --web             review in the browser instead of the terminal
+  --port <n>        dev server port for --web (default 5273)
   --timeout <s>     give up on the analysis after this many seconds (default 600)
   -h, --help        show this
 `
@@ -55,6 +61,7 @@ function parseArgs(argv) {
     base: null,
     refresh: false,
     analyze: true,
+    web: false,
     port: '5273',
     timeout: 600,
   }
@@ -66,6 +73,7 @@ function parseArgs(argv) {
     } else if (arg === '--branch') options.branch = true
     else if (arg === '--refresh') options.refresh = true
     else if (arg === '--no-analyze') options.analyze = false
+    else if (arg === '--web') options.web = true
     else if (arg === '--base') options.base = argv[++i]
     else if (arg === '--port') options.port = argv[++i]
     else if (arg === '--timeout') options.timeout = Number(argv[++i]) || 600
@@ -137,19 +145,54 @@ function capturePatch(repoRoot, target) {
   return run('git', ['diff', `${target.baseRef}...HEAD`], { cwd: repoRoot })
 }
 
-/** Pull the analysis object out of claude's final message, tolerating a code
- *  fence or stray prose around it. */
+/**
+ * Pull the analysis object out of claude's final message, tolerating a code
+ * fence or stray prose around it.
+ *
+ * Scans for brace-balanced spans rather than matching a fence, because the
+ * `fix` field is asked for as markdown and routinely contains its own fenced
+ * code block. A fence-first regex stops at that inner fence and truncates the
+ * reply mid-object.
+ */
 function extractJson(text) {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/)
-  const candidate = (fenced ? fenced[1] : text).trim()
-  const start = candidate.indexOf('{')
-  const end = candidate.lastIndexOf('}')
-  if (start === -1 || end <= start) return null
-  try {
-    return JSON.parse(candidate.slice(start, end + 1))
-  } catch {
-    return null
+  const objects = []
+
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== '{') continue
+
+    let depth = 0
+    let inString = false
+    let escaped = false
+
+    for (let j = i; j < text.length; j++) {
+      const char = text[j]
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === '"') inString = !inString
+      else if (inString) continue
+      else if (char === '{') depth++
+      else if (char === '}' && --depth === 0) {
+        try {
+          objects.push(JSON.parse(text.slice(i, j + 1)))
+        } catch {
+          // Not JSON, or truncated mid-reply; keep looking.
+        }
+        i = j
+        break
+      }
+    }
   }
+
+  return objects.find((object) => object?.slices) ?? objects[0] ?? null
+}
+
+/** The usage-limit notice claude prints when there is no budget left to run. */
+function limitNotice(...texts) {
+  for (const text of texts) {
+    const match = text?.match(/[^\n]*\b(?:hit your|usage|rate|session|weekly|quota)\b[^\n]*\blimit\b[^\n]*/i)
+    if (match) return match[0].trim()
+  }
+  return null
 }
 
 /**
@@ -161,13 +204,32 @@ function extractJson(text) {
  * forever. Read-only tools plus stdout avoids the prompt entirely. The timeout
  * is a backstop so an unexpected prompt still can't wedge the CLI.
  */
-function runAnalysis({ repoRoot, target, patchPath, filesPath, timeoutMs }) {
-  const prompt = analysisPrompt({
-    patchPath,
-    filesPath,
-    target,
-    hasConventions: existsSync(join(repoRoot, 'docs/CONVENTIONS.md')),
-  })
+/**
+ * Convention sources the review should be judged against.
+ *
+ * `.github/instructions/*.md` is the Copilot convention and, unlike AGENTS.md
+ * or CLAUDE.md, claude does not load it on its own — so it has to be named in
+ * the prompt or it is silently ignored.
+ */
+function conventionSources(repoRoot) {
+  const found = []
+
+  const instructions = join(repoRoot, '.github/instructions')
+  if (existsSync(instructions)) {
+    for (const name of readdirSync(instructions).sort()) {
+      if (name.endsWith('.md')) found.push(`.github/instructions/${name}`)
+    }
+  }
+
+  for (const candidate of ['docs/CONVENTIONS.md', 'CONVENTIONS.md']) {
+    if (existsSync(join(repoRoot, candidate))) found.push(candidate)
+  }
+
+  return found
+}
+
+function runAnalysis({ repoRoot, target, patchPath, filesPath, rawPath, timeoutMs, conventionFiles }) {
+  const prompt = analysisPrompt({ patchPath, filesPath, target, conventionFiles })
 
   // claude -p emits nothing until it finishes, so without a ticker a run that
   // legitimately takes minutes is indistinguishable from a hang.
@@ -192,8 +254,9 @@ function runAnalysis({ repoRoot, target, patchPath, filesPath, timeoutMs }) {
       clearInterval(ticker)
       clearTimeout(timer)
       process.stderr.write(`\r${' '.repeat(56)}\r`)
-      if (message) console.error(`  ${message}`)
-      else console.log(`  analysis finished in ${Math.round((Date.now() - startedAt) / 1000)}s`)
+      const elapsed = `${Math.round((Date.now() - startedAt) / 1000)}s`
+      if (message) console.error(`  analysis failed after ${elapsed}: ${message}`)
+      else console.log(`  analysis finished in ${elapsed}`)
       done(value)
     }
 
@@ -205,21 +268,41 @@ function runAnalysis({ repoRoot, target, patchPath, filesPath, timeoutMs }) {
     child.on('error', (error) => finish(null, `claude failed to start: ${error.message}`))
 
     child.on('close', (code) => {
-      if (code !== 0) {
-        return finish(null, `claude exited with code ${code}${stderr ? `: ${stderr.trim().split('\n')[0]}` : ''}`)
-      }
-
-      // --output-format json wraps the reply; older shapes return it bare.
-      let envelope
+      // --output-format json wraps the reply, but a run that dies early prints
+      // the bare reply or nothing at all. Try every shape before giving up: a
+      // usable reply is worth salvaging even from a nonzero exit, because
+      // re-running it costs another slice of the usage window.
+      let envelope = null
       try {
         envelope = JSON.parse(stdout)
       } catch {
-        return finish(extractJson(stdout), null)
+        // Not the JSON envelope; the scan below still reads stdout directly.
+      }
+      const reply = typeof envelope?.result === 'string' ? envelope.result : stdout
+
+      const payload = extractJson(reply) ?? extractJson(stdout)
+      if (payload?.slices) return finish(payload, null)
+
+      const limit = limitNotice(reply, stderr)
+
+      // Keep whatever came back so a parse bug or a partial reply can be
+      // recovered without paying for the run twice. A limit notice is not a
+      // reply, so it is not worth caching.
+      let saved = false
+      if (!limit && reply.includes('{')) {
+        writeFileSync(rawPath, reply)
+        saved = true
       }
 
-      const payload = typeof envelope?.result === 'string' ? extractJson(envelope.result) : envelope
-      if (!payload?.slices) return finish(null, 'the analysis reply was not in the expected shape')
-      finish(payload, null)
+      const reason = limit
+        ? `claude hit a usage limit — ${limit}`
+        : code !== 0
+          ? `claude exited with code ${code}${stderr.trim() ? `: ${stderr.trim().split('\n')[0]}` : ''}`
+          : payload
+            ? 'the analysis reply was JSON but had no "slices" key'
+            : 'the analysis reply was not in the expected shape'
+
+      finish(null, `${reason}${saved ? `\n  the raw reply is at ${rawPath} — the next run will retry parsing it` : ''}`)
     })
   })
 }
@@ -261,6 +344,7 @@ async function main() {
   const patchPath = join(cacheDir, `${id}.patch`)
   const filesPath = join(cacheDir, `${id}.files.json`)
   const analysisPath = join(cacheDir, `${id}.analysis.json`)
+  const rawPath = join(cacheDir, `${id}.analysis.raw.txt`)
   const reviewPath = join(cacheDir, `${id}.review.json`)
 
   writeFileSync(patchPath, patch)
@@ -290,15 +374,37 @@ async function main() {
       console.error(`  could not parse the cached analysis: ${error.message}`)
     }
   } else {
-    analysis = await runAnalysis({
-      repoRoot,
-      target,
-      patchPath,
-      filesPath,
-      timeoutMs: options.timeout * 1000,
-    })
-    if (analysis) writeFileSync(analysisPath, JSON.stringify(analysis, null, 2))
-    else console.error('  opening the diff without analysis')
+    // A previous run's reply that failed to parse is retried first: it already
+    // cost a slice of the usage window, so spend the parse before the tokens.
+    if (existsSync(rawPath) && !options.refresh) {
+      analysis = extractJson(readFileSync(rawPath, 'utf8'))
+      if (analysis?.slices) console.log('  recovered the previous run’s reply from cache')
+      else analysis = null
+    }
+
+    if (!analysis) {
+      const conventionFiles = conventionSources(repoRoot)
+      if (conventionFiles.length > 0) {
+        console.log(`  judging against ${conventionFiles.join(', ')}`)
+      }
+
+      analysis = await runAnalysis({
+        repoRoot,
+        target,
+        patchPath,
+        filesPath,
+        rawPath,
+        timeoutMs: options.timeout * 1000,
+        conventionFiles,
+      })
+    }
+
+    if (analysis) {
+      writeFileSync(analysisPath, JSON.stringify(analysis, null, 2))
+      rmSync(rawPath, { force: true })
+    } else {
+      console.error('  opening the diff without analysis')
+    }
   }
 
   const { review, warnings } = analysis
@@ -317,11 +423,23 @@ async function main() {
   const slices = review.slices.length
   console.log(`\n  ${slices} slice(s), ${findings} finding(s)\n`)
 
+  // The terminal viewer is the default: it needs no server, no browser, and no
+  // second window. `--web` gets the richer surface — line comments and posting
+  // a review back to GitHub still only exist there.
+  if (!options.web) {
+    const viewer = spawn(process.execPath, [TUI_BIN, reviewPath], {
+      stdio: 'inherit',
+      env: { ...process.env, PR_REVIEW_REPO: repoRoot },
+    })
+    viewer.on('close', (code) => process.exit(code ?? 0))
+    return
+  }
+
   const url = `http://localhost:${options.port}`
   console.log(`  ${url}\n`)
 
   const server = spawn('npm', ['run', 'dev', '--', '--port', String(options.port)], {
-    cwd: APP_DIR,
+    cwd: WEB_DIR,
     stdio: ['ignore', 'inherit', 'inherit'],
     env: { ...process.env, PR_REVIEW_FILE: reviewPath, PR_REVIEW_REPO: repoRoot },
   })
