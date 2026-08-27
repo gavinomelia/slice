@@ -1,20 +1,27 @@
 {
-  "name": "pr-review-workspace",
-  "version": "1.0.0",
-  "description": "Slice-grouped PR review: a shared analysis pipeline with a terminal and a browser viewer",
-  "private": true,
+  "name": "@gavinomelia/slice",
+  "version": "0.1.0",
+  "description": "Read a pull request as behavioral slices, not as a pile of files — an AI-analyzed diff in your terminal",
+  "keywords": ["pull-request", "code-review", "cli", "tui", "ink", "github", "diff", "claude"],
+  "license": "MIT",
+  "author": "Gavin OMelia",
   "type": "module",
-  "workspaces": [
-    "packages/config",
-    "packages/core",
-    "packages/tui",
-    "packages/web"
-  ],
-  "scripts": {
-    "review": "node packages/core/bin/pr-review.mjs",
-    "tui": "node packages/tui/bin/pr-review-tui.mjs",
-    "web": "npm run dev --workspace @pr-review/web",
-    "check": "npm run check --workspace @pr-review/web"
+  "private": true,
+  "bin": { "slice": "./bin/slice.mjs" },
+  "exports": {
+    ".": "./src/viewer/app.mjs",
+    "./config": "./src/config/index.mjs",
+    "./package.json": "./package.json"
   },
-  "license": "ISC"
+  "files": ["bin", "src", "README.md", "LICENSE"],
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "slice": "node bin/slice.mjs",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "@pierre/diffs": "^1.3.6",
+    "ink": "^6.6.0",
+    "react": "^19.2.8"
+  }
 }

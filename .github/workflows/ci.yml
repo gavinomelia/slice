@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 20 is the floor declared in engines; 22 and 24 are the active LTS
+        # lines. Ink and Shiki are the parts most likely to care.
+        node: ['20', '22', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  # The CLI has no test coverage of its own — it talks to gh, git and claude —
+  # so at minimum prove it parses and its entry points load on every push.
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: node --check bin/slice.mjs
+      - run: node bin/slice.mjs --version
+      - run: node bin/slice.mjs --help
+      - run: node bin/slice.mjs --print-config
+      - name: viewer module loads
+        run: node -e "import('./src/viewer/app.mjs').then(m => { if (!m.runViewer) process.exit(1) })"
