@@ -1,59 +1,79 @@
 #!/usr/bin/env node
 /**
- * SPIKE — terminal viewer for a review.json produced by pr-review.
+ * Terminal viewer for a review.json produced by pr-review.
  *
  * Usage: pr-review-tui [<path-to-review.json>]
  *        PR_REVIEW_FILE=… pr-review-tui
  *
  * Deliberately no JSX: this runs straight off node with no build step, so the
- * layout is written with createElement. If the spike graduates, add esbuild.
+ * layout is written with createElement.
+ *
+ * Nothing here hardcodes a colour or a glyph. Appearance comes from the config
+ * file and the taxonomy from the review manifest, both resolved once at
+ * startup in src/theme.mjs.
  */
 import { readFileSync } from 'node:fs'
 import { createElement as h, useEffect, useMemo, useRef, useState } from 'react'
 import { Box, Text, render, useApp, useInput, useStdout } from 'ink'
 
-import { buildRows, codeHighlighter } from '../src/render.mjs'
-import { indentLines, markdownLines, parseInline, plain, setCodeHighlighter, wrapSegments } from '../src/markdown.mjs'
+import { buildRows, codeHighlighter, resolveSyntaxTheme } from '../src/render.mjs'
+import {
+  indentLines,
+  markdownLines,
+  padSegments,
+  parseInline,
+  plain,
+  segmentsWidth,
+  setCodeHighlighter,
+  setMarkdownTheme,
+  sliceSegments,
+  wrapSegments,
+} from '../src/markdown.mjs'
 import { composeInEditor, loadDrafts, saveDrafts, seedFromFinding } from '../src/compose.mjs'
 import { partitionDrafts, postReview } from '../src/github.mjs'
+import { viewerConfig } from '../src/theme.mjs'
 
-const SEVERITY = {
-  bug: { glyph: '●', color: 'red' },
-  risk: { glyph: '◆', color: 'yellow' },
-  cleanup: { glyph: '▲', color: 'cyan' },
-  nit: { glyph: '▪', color: 'gray' },
-  question: { glyph: '?', color: 'magenta' },
-}
-
-const RISK = { low: 'green', medium: 'yellow', high: 'red' }
 const PANES = ['tree', 'diff', 'findings']
 
-/** Slices flattened into one selectable list. Headers are selectable too. */
+/**
+ * Slices flattened into one selectable list. Headers are selectable too.
+ *
+ * `last` marks the final file of a slice so the tree can close the group with
+ * a corner rather than a tee — the one cue that tells you where a slice ends
+ * without counting.
+ */
 function buildTree(review) {
   const rows = [{ type: 'overview' }]
   for (const [index, slice] of review.slices.entries()) {
     rows.push({ type: 'slice', sliceIndex: index })
-    for (const path of slice.paths) {
-      if (review.files[path]) rows.push({ type: 'file', sliceIndex: index, path })
-    }
+    const paths = slice.paths.filter((path) => review.files[path])
+    paths.forEach((path, at) => rows.push({ type: 'file', sliceIndex: index, path, last: at === paths.length - 1 }))
   }
   // Only a PR can receive a review, so a branch diff gets no drafts row.
   if (review.target.kind === 'pr' && review.target.number) rows.push({ type: 'drafts' })
   return rows
 }
 
-const countFor = (review, path) => review.findings.filter((f) => f.path === path).length
+const findingsFor = (review, path) => review.findings.filter((f) => f.path === path)
 
 const draftKey = (path, side, line) => `${path}:${side}:${line ?? 'file'}`
 
+/** A row of severity glyphs, so a count reads as "what kind" not just "how many". */
+function severityGlyphs(findings, ui, limit = 4) {
+  const shown = findings.slice(0, limit)
+  const segments = shown.map((finding) => ({ text: ui.severity(finding.severity).glyph, color: ui.severity(finding.severity).color }))
+  if (findings.length > shown.length) segments.push({ text: '+', color: ui.theme.ui.muted })
+  return segments
+}
+
 /** The submit surface: what is staged, and what will happen to it. */
-function draftsCard(review, drafts, width) {
+function draftsCard(review, drafts, width, ui) {
   const { comments, orphans } = partitionDrafts(drafts)
   const lines = [
     ...wrapSegments(parseInline('Draft review', { bold: true }), width),
     plain(
       `${drafts.length} draft(s) · ${comments.length} as line comments${orphans.length ? ` · ${orphans.length} appended to the body` : ''}`,
-      { color: 'gray' },
+      { color: ui.theme.ui.muted },
     ),
     [],
   ]
@@ -64,9 +84,12 @@ function draftsCard(review, drafts, width) {
 
   for (const draft of drafts) {
     lines.push([
-      { text: '▌ ', color: 'green' },
+      { text: '▌ ', color: ui.theme.ui.draft },
       { text: draft.path, bold: true },
-      { text: draft.line ? `:${draft.line}` : '  (no line anchor — goes in the body)', color: draft.line ? 'gray' : 'yellow' },
+      {
+        text: draft.line ? `:${draft.line}` : '  (no line anchor — goes in the body)',
+        color: draft.line ? ui.theme.ui.muted : ui.theme.risk.medium,
+      },
     ])
     lines.push(...indentLines(markdownLines(draft.body, width - 4), 2))
     lines.push([])
@@ -82,47 +105,51 @@ function draftsCard(review, drafts, width) {
     )
   }
 
-  lines.push(plain('SUBMIT', { color: 'gray', bold: true }))
+  lines.push(plain('SUBMIT', { color: ui.theme.ui.heading, bold: true }))
   lines.push(...markdownLines('`s` comment · `A` approve · `R` request changes — each opens $EDITOR for the review body first.', width))
   return lines
 }
 
 /** The card shown in the centre pane when a slice header is selected. */
-function sliceCard(review, slice, width) {
+function sliceCard(review, slice, width, ui) {
+  const kind = ui.sliceKind(slice.kind)
   const lines = [
     ...wrapSegments(parseInline(slice.title, { bold: true }), width),
-    plain(`${slice.kind} · ${slice.paths.length} file(s)`, { color: 'gray' }),
+    [
+      { text: slice.kind, color: kind.color ?? ui.theme.ui.muted },
+      { text: ` · ${slice.paths.length} file(s)`, color: ui.theme.ui.muted },
+    ],
     [],
     ...markdownLines(slice.summary, width),
     [],
-    plain('FILES', { color: 'gray', bold: true }),
+    plain('FILES', { color: ui.theme.ui.heading, bold: true }),
   ]
   for (const path of slice.paths) {
-    const count = countFor(review, path)
+    const findings = findingsFor(review, path)
     lines.push([
-      { text: `  ${path}`, color: count ? 'yellow' : undefined },
-      ...(count ? [{ text: `  (${count})`, color: 'yellow', dim: true }] : []),
+      { text: `  ${path}` },
+      ...(findings.length ? [{ text: '  ' }, ...severityGlyphs(findings, ui)] : []),
     ])
   }
   return lines
 }
 
-function overviewCard(review, width) {
+function overviewCard(review, width, ui) {
   const { overview, target } = review
   return [
     ...wrapSegments(parseInline(target.title, { bold: true }), width),
     plain(
       `${target.kind === 'pr' ? `#${target.number}` : target.headRef} · ${target.author} · ${target.baseRef} ← ${target.headRef}`,
-      { color: 'gray' },
+      { color: ui.theme.ui.muted },
     ),
     [],
-    plain('INTENT', { color: 'gray', bold: true }),
+    plain('INTENT', { color: ui.theme.ui.heading, bold: true }),
     ...markdownLines(overview.intent, width),
     [],
-    plain('ASSESSMENT', { color: 'gray', bold: true }),
+    plain('ASSESSMENT', { color: ui.theme.ui.heading, bold: true }),
     ...markdownLines(overview.assessment, width),
     [],
-    plain(`risk: ${overview.risk}`, { color: RISK[overview.risk] ?? 'gray', bold: true }),
+    plain(`risk: ${overview.risk}`, { color: ui.theme.risk[overview.risk] ?? ui.theme.ui.muted, bold: true }),
   ]
 }
 
@@ -133,13 +160,13 @@ function overviewCard(review, width) {
  * one to the top — a finding whose body runs past the pane is useless if you
  * can only ever see its first line.
  */
-function findingLines(findings, active, width) {
+function findingLines(findings, active, width, ui) {
   const lines = []
   const starts = []
 
   findings.forEach((finding, index) => {
     starts.push(lines.length)
-    const meta = SEVERITY[finding.severity] ?? SEVERITY.nit
+    const meta = ui.severity(finding.severity)
     const isActive = index === active
 
     const head = wrapSegments(parseInline(finding.title, { bold: isActive, dim: !isActive }), width - 3)
@@ -154,12 +181,20 @@ function findingLines(findings, active, width) {
       const anchor = finding.line
         ? `L${finding.line}${finding.endLine && finding.endLine !== finding.line ? `-${finding.endLine}` : ''}`
         : 'file'
-      lines.push(plain(`   ${anchor} · ${finding.severity} · ${finding.confidence}`, { color: 'gray' }))
-      lines.push([])
-      lines.push(...indentLines(markdownLines(finding.why, width - 6), 3))
+      // An expanded finding runs long, so it gets a rule down its left edge —
+      // without it there is no telling where the body stops and the next
+      // collapsed finding starts.
+      const rule = (line) => [{ text: ' ▏ ', color: meta.color, dim: true }, ...line]
+
+      lines.push([
+        { text: ' ▏ ', color: meta.color, dim: true },
+        { text: `${anchor} · ${finding.severity} · ${finding.confidence}`, color: ui.theme.ui.muted },
+      ])
+      lines.push(rule([]))
+      lines.push(...markdownLines(finding.why, width - 6).map(rule))
       if (finding.fix?.trim()) {
-        lines.push([], plain('   FIX', { color: 'green', bold: true }))
-        lines.push(...indentLines(markdownLines(finding.fix, width - 6), 3))
+        lines.push(rule([]), rule([{ text: 'FIX', color: ui.theme.ui.draft, bold: true }]))
+        lines.push(...markdownLines(finding.fix, width - 6).map(rule))
       }
     } else {
       const [first] = markdownLines(finding.why, width - 6)
@@ -172,11 +207,39 @@ function findingLines(findings, active, width) {
 }
 
 /**
- * The focused pane is drawn with a heavy cyan border and its number in the
+ * A one-column scrollbar down the right edge of a pane.
+ *
+ * Three panes all scroll independently, and without this there is nothing on
+ * screen that says how much of anything you are looking at. It renders nothing
+ * when the content fits, so a short pane stays clean.
+ */
+function Scrollbar({ total, top, height, theme }) {
+  if (total <= height || height <= 0) return h(Box, { width: 1, flexShrink: 0 })
+
+  const size = Math.max(1, Math.round((height * height) / total))
+  const at = Math.round(((height - size) * top) / (total - height))
+
+  // A quarter block against an eighth block. The two read as thumb and track
+  // by weight rather than by colour, which keeps a permanent fixture in the
+  // margin from competing with the diff for attention.
+  return h(
+    Box,
+    { width: 1, flexShrink: 0, flexDirection: 'column' },
+    ...Array.from({ length: height }, (_, i) =>
+      i >= at && i < at + size
+        ? h(Text, { key: i, color: theme.ui.scrollThumb }, '▎')
+        : h(Text, { key: i, color: theme.ui.scrollTrack, dimColor: true }, '▏'),
+    ),
+  )
+}
+
+/**
+ * The focused pane is drawn with a heavy accent border and its number in the
  * title. The mode is real, so it has to be visible — an invisible focus is
  * what makes j do three unpredictable things.
  */
-function Pane({ title, number, focused, width, children }) {
+function Pane({ title, number, focused, width, theme, total, top, height, children }) {
+  const edge = focused ? theme.ui.borderFocus : theme.ui.border
   return h(
     Box,
     {
@@ -184,17 +247,25 @@ function Pane({ title, number, focused, width, children }) {
       width,
       flexShrink: 0,
       borderStyle: focused ? 'bold' : 'round',
-      borderColor: focused ? 'cyan' : 'gray',
+      borderColor: edge,
       overflow: 'hidden',
       paddingX: 1,
     },
+    // Elided in the middle, not at the end: a diff title is a long path
+    // followed by the position indicators, and both ends carry more than the
+    // directories in between do.
     h(
       Text,
-      { bold: true, wrap: 'truncate' },
-      h(Text, { color: focused ? 'cyan' : 'gray' }, `${number} `),
-      h(Text, { color: focused ? 'cyan' : 'gray', dimColor: !focused }, title),
+      { bold: true, wrap: 'truncate-middle' },
+      h(Text, { color: edge }, `${number} `),
+      h(Text, { color: edge, dimColor: !focused }, title),
     ),
-    children,
+    h(
+      Box,
+      { flexDirection: 'row', flexGrow: 1 },
+      h(Box, { flexDirection: 'column', flexGrow: 1, overflow: 'hidden' }, children),
+      h(Scrollbar, { total, top, height, theme }),
+    ),
   )
 }
 
@@ -229,9 +300,10 @@ function windowFor(index, total, height) {
   return Math.max(0, Math.min(index - Math.floor(height / 2), total - height))
 }
 
-function App({ review, reviewPath, ink }) {
+function App({ review, reviewPath, ink, ui }) {
   const { exit } = useApp()
   const { stdout } = useStdout()
+  const { theme, layout } = ui
 
   const [size, setSize] = useState({ cols: stdout.columns || 120, rows: stdout.rows || 40 })
   useEffect(() => {
@@ -245,13 +317,17 @@ function App({ review, reviewPath, ink }) {
   const [treeIndex, setTreeIndex] = useState(0)
   const [scroll, setScroll] = useState(0)
   const [cursor, setCursor] = useState(0)
+  const [hOffset, setHOffset] = useState(0)
   const [findingIndex, setFindingIndex] = useState(0)
   const [rows, setRows] = useState([])
   const [loading, setLoading] = useState(false)
   const [drafts, setDrafts] = useState(() => loadDrafts(reviewPath))
-  const [status, setStatus] = useState(null)
+  const [status, setStatus] = useState(() =>
+    ui.warnings.length ? { tone: theme.risk.medium, text: ui.warnings.join(' · ') } : null,
+  )
   const [focus, setFocus] = useState('tree')
   const [findScroll, setFindScroll] = useState(0)
+  const [zoomed, setZoomed] = useState(false)
 
   const current = tree[treeIndex]
   const path = current?.type === 'file' ? current.path : null
@@ -260,7 +336,7 @@ function App({ review, reviewPath, ink }) {
   // A file shows its own findings; a slice header shows every finding it
   // covers, so the card doubles as the slice's triage list.
   const findings = useMemo(() => {
-    if (path) return review.findings.filter((f) => f.path === path)
+    if (path) return findingsFor(review, path)
     if (current?.type === 'slice') return review.findings.filter((f) => slice.paths.includes(f.path))
     return review.findings
   }, [review, path, current, slice])
@@ -275,11 +351,12 @@ function App({ review, reviewPath, ink }) {
     if (!path) return setRows([])
     let live = true
     setLoading(true)
-    buildRows(review.files[path])
+    buildRows(review.files[path], { theme: ui.syntax, tabWidth: layout.tabWidth })
       .then((next) => {
         if (!live) return
         setRows(next)
         setScroll(0)
+        setHOffset(0)
         // Landing here from n/p should put the cursor on the finding's line,
         // not the top of the file — otherwise you have to hunt for it.
         const at = pendingLine.current
@@ -289,11 +366,16 @@ function App({ review, reviewPath, ink }) {
         pendingLine.current = null
         setLoading(false)
       })
-      .catch((error) => live && (setRows([{ kind: 'ctx', gutter: ' ', ansi: `error: ${error.message}` }]), setLoading(false)))
+      .catch(
+        (error) =>
+          live &&
+          (setRows([{ kind: 'ctx', line: null, segments: [{ text: `error: ${error.message}` }], text: '' }]),
+          setLoading(false)),
+      )
     return () => {
       live = false
     }
-  }, [review, path])
+  }, [review, path, ui.syntax, layout.tabWidth])
 
   // Chrome: header 2, footer 1, pane border 2 + title 1, and one spare row.
   //
@@ -302,16 +384,30 @@ function App({ review, reviewPath, ink }) {
   // which leaves torn text from the previous frame behind.
   const bodyHeight = Math.max(6, size.rows - 7)
 
-  const treeWidth = Math.min(38, Math.max(24, Math.floor(size.cols * 0.22)))
-  const findWidth = Math.min(58, Math.max(32, Math.floor(size.cols * 0.3)))
-  const diffWidth = Math.max(20, size.cols - treeWidth - findWidth)
+  // Zoom hides the side panes rather than shrinking them. A diff is the one
+  // thing here with an irreducible width — wrapping it would be a lie about
+  // the code, so the way to see more of it is to give it the whole terminal.
+  // The configured widths are honoured outright when they fit, and scaled down
+  // together when they do not. Clamping each one separately against the
+  // terminal made the setting look broken — a request for a wider tree simply
+  // vanished — while ignoring the terminal entirely let two fixed side panes
+  // starve the diff, which is the one pane whose width is not negotiable.
+  const budget = Math.floor(size.cols * 0.62)
+  const wanted = layout.treeWidth + layout.findingsWidth
+  const shrink = wanted > budget ? budget / wanted : 1
+  const treeWidth = Math.max(16, Math.round(layout.treeWidth * shrink))
+  const findWidth = Math.max(20, Math.round(layout.findingsWidth * shrink))
+  const diffWidth = zoomed ? size.cols : Math.max(20, size.cols - treeWidth - findWidth)
+
+  // Border 2 + paddingX 2 + the scrollbar column.
+  const inner = (width) => Math.max(8, width - 5)
 
   const centre = useMemo(() => {
-    if (current?.type === 'overview') return overviewCard(review, diffWidth - 4)
-    if (current?.type === 'slice') return sliceCard(review, slice, diffWidth - 4)
-    if (current?.type === 'drafts') return draftsCard(review, drafts, diffWidth - 4)
+    if (current?.type === 'overview') return overviewCard(review, inner(diffWidth), ui)
+    if (current?.type === 'slice') return sliceCard(review, slice, inner(diffWidth), ui)
+    if (current?.type === 'drafts') return draftsCard(review, drafts, inner(diffWidth), ui)
     return null
-  }, [review, current, slice, drafts, diffWidth])
+  }, [review, current, slice, drafts, diffWidth, ui])
 
   const draftAt = useMemo(() => {
     const index = new Map()
@@ -328,7 +424,7 @@ function App({ review, reviewPath, ink }) {
   const commentOnCursor = async () => {
     const row = rows[cursor]
     if (!path || !row || row.kind === 'hunk' || !row.line) {
-      return setStatus({ tone: 'yellow', text: 'Put the cursor on a diff line first (↑/↓).' })
+      return setStatus({ tone: theme.risk.medium, text: 'Put the cursor on a diff line first (↑/↓).' })
     }
 
     const side = row.kind === 'del' ? 'deletions' : 'additions'
@@ -359,16 +455,16 @@ function App({ review, reviewPath, ink }) {
     const without = drafts.filter((d) => draftKey(d.path, d.side, d.line) !== key)
     if (!body) {
       persist(without)
-      return setStatus(existing ? { tone: 'gray', text: 'Draft discarded.' } : null)
+      return setStatus(existing ? { tone: theme.ui.muted, text: 'Draft discarded.' } : null)
     }
     persist([...without, { path, line: row.line, side, body }])
-    setStatus({ tone: 'green', text: `Draft saved on ${path}:${row.line}.` })
+    setStatus({ tone: theme.ui.draft, text: `Draft saved on ${path}:${row.line}.` })
   }
 
   const submit = async (event) => {
     const { repo, number, viewerIsAuthor } = review.target
     if (review.target.kind !== 'pr' || !number) {
-      return setStatus({ tone: 'yellow', text: 'This is a branch diff, not a PR — nothing to post to.' })
+      return setStatus({ tone: theme.risk.medium, text: 'This is a branch diff, not a PR — nothing to post to.' })
     }
 
     const verb = event === 'APPROVE' ? 'Approving' : event === 'REQUEST_CHANGES' ? 'Requesting changes on' : 'Commenting on'
@@ -389,7 +485,7 @@ function App({ review, reviewPath, ink }) {
       redraw: () => ink.instance?.clear(),
     })
 
-    setStatus({ tone: 'gray', text: 'Posting…' })
+    setStatus({ tone: theme.ui.muted, text: 'Posting…' })
     const result = await postReview({
       repo,
       number,
@@ -400,7 +496,7 @@ function App({ review, reviewPath, ink }) {
       cwd: process.env.PR_REVIEW_REPO ?? process.cwd(),
     })
 
-    if (!result.ok) return setStatus({ tone: 'red', text: result.error })
+    if (!result.ok) return setStatus({ tone: theme.risk.high, text: result.error })
 
     // The drafts are on GitHub now; keeping them would re-post on the next
     // submit.
@@ -410,10 +506,10 @@ function App({ review, reviewPath, ink }) {
       result.downgraded ? 'downgraded to a plain comment (your own PR)' : null,
       result.orphanCount ? `${result.orphanCount} appended to the body` : null,
     ].filter(Boolean)
-    setStatus({ tone: 'green', text: `${notes.join(' · ')}. ${result.url ?? ''}`.trim() })
+    setStatus({ tone: theme.ui.draft, text: `${notes.join(' · ')}. ${result.url ?? ''}`.trim() })
   }
 
-  const found = useMemo(() => findingLines(findings, active, findWidth - 4), [findings, active, findWidth])
+  const found = useMemo(() => findingLines(findings, active, inner(findWidth), ui), [findings, active, findWidth, ui])
 
   // moveIn needs these at keypress time, after render has computed them.
   const foundLength = useRef(0)
@@ -431,7 +527,7 @@ function App({ review, reviewPath, ink }) {
     const at = tree.findIndex((r) => r.type === 'file' && r.path === finding.path)
     pendingLine.current = finding.line ?? null
     if (at >= 0) setTreeIndex(at)
-    const within = review.findings.filter((f) => f.path === finding.path).indexOf(finding)
+    const within = findingsFor(review, finding.path).indexOf(finding)
     setFindingIndex(Math.max(0, within))
     setFocus('findings')
   }
@@ -461,6 +557,13 @@ function App({ review, reviewPath, ink }) {
     setFindScroll((s) => Math.max(0, Math.min(max, s + delta)))
   }
 
+  // The widest line in the file, so sideways scrolling stops at the end of the
+  // content instead of running off into empty space.
+  const widest = useMemo(() => rows.reduce((max, row) => Math.max(max, row.text?.length ?? 0), 0), [rows])
+  const codeWidth = Math.max(8, inner(diffWidth) - 8)
+  const scrollSide = (delta) =>
+    setHOffset((x) => Math.max(0, Math.min(Math.max(0, widest - codeWidth + 2), x + delta * layout.hScrollStep)))
+
   // Key repeat arrives coalesced — holding j delivers "jjjj" as one input, and
   // matching on the whole string would drop all but the first. Split plain
   // input into characters; escape sequences come through `key` and are passed
@@ -473,27 +576,43 @@ function App({ review, reviewPath, ink }) {
     handleKey(input, key)
   })
 
-  // Every key means exactly one thing, everywhere. There is no focused pane
-  // and no mode: j/k always walks the tree, arrows always scroll the body,
-  // n/p always walks findings. Nothing on screen changes what a key does.
   function handleKey(input, key) {
     if (input === 'q' || key.escape || (key.ctrl && input === 'c')) return exit()
 
-    if (input === 'c') return void commentOnCursor().catch((e) => setStatus({ tone: 'red', text: e.message }))
+    if (input === 'c') return void commentOnCursor().catch((e) => setStatus({ tone: theme.risk.high, text: e.message }))
     if (input === 's' || input === 'A' || input === 'R') {
       const event = input === 'A' ? 'APPROVE' : input === 'R' ? 'REQUEST_CHANGES' : 'COMMENT'
-      return void submit(event).catch((e) => setStatus({ tone: 'red', text: e.message }))
+      return void submit(event).catch((e) => setStatus({ tone: theme.risk.high, text: e.message }))
     }
 
-    if (input === '1') return setFocus('tree')
+    // Asking for a hidden pane means you want it back, so a number key unzooms
+    // rather than doing nothing.
+    if (input === '1') return setZoomed(false), setFocus('tree')
     if (input === '2') return setFocus('diff')
-    if (input === '3') return setFocus('findings')
-    if (key.tab) return setFocus(PANES[(PANES.indexOf(focus) + (key.shift ? 2 : 1)) % 3])
+    if (input === '3') return setZoomed(false), setFocus('findings')
+    if (input === 'z') {
+      const next = !zoomed
+      setZoomed(next)
+      if (next) setFocus('diff')
+      return
+    }
+    if (key.tab) {
+      if (zoomed) return setFocus('diff')
+      return setFocus(PANES[(PANES.indexOf(focus) + (key.shift ? 2 : 1)) % 3])
+    }
 
     if (input === 'j' || key.downArrow) return moveIn(1)
     if (input === 'k' || key.upArrow) return moveIn(-1)
     if (key.pageDown || input === ' ') return moveIn(bodyHeight - 2)
     if (key.pageUp || input === 'b') return moveIn(-(bodyHeight - 2))
+
+    // Sideways only means something over a diff; a card is already wrapped to
+    // the pane, so there is nothing off screen to reach.
+    if (!centre) {
+      if (input === 'l' || key.rightArrow) return scrollSide(1)
+      if (input === 'h' || key.leftArrow) return scrollSide(-1)
+      if (input === '0') return setHOffset(0)
+    }
 
     // [ and ] land on the slice *header*, not its first file — the point is to
     // read what the slice is before reading its diffs.
@@ -501,7 +620,7 @@ function App({ review, reviewPath, ink }) {
       const here = current?.sliceIndex ?? -1
       const target = Math.max(0, Math.min(review.slices.length - 1, here + (input === ']' ? 1 : -1)))
       const at = tree.findIndex((r) => r.type === 'slice' && r.sliceIndex === target)
-      if (at >= 0) setTreeIndex(at), setFocus('tree')
+      if (at >= 0) setTreeIndex(at), setZoomed(false), setFocus('tree')
       return
     }
 
@@ -510,6 +629,7 @@ function App({ review, reviewPath, ink }) {
       if (all.length === 0) return
       const here = all.indexOf(findings[active])
       const next = (Math.max(0, here) + (input === 'n' ? 1 : -1) + all.length) % all.length
+      setZoomed(false)
       selectFinding(all[next])
     }
   }
@@ -527,7 +647,72 @@ function App({ review, reviewPath, ink }) {
       ? `DRAFT REVIEW${drafts.length ? ` (${drafts.length})` : ''}`
       : current?.type === 'slice'
         ? `SLICE ${current.sliceIndex + 1}/${review.slices.length}`
-        : `${path}${rows.length ? `  L${rows[cursor]?.line ?? '–'}  ${centreTop + 1}-${Math.min(rows.length, centreTop + bodyHeight)}/${rows.length}` : ''}`
+        : [
+            path,
+            rows.length ? `L${rows[cursor]?.line ?? '–'}` : '',
+            rows.length ? `${centreTop + 1}-${Math.min(rows.length, centreTop + bodyHeight)}/${rows.length}` : '',
+            hOffset > 0 ? `→${hOffset}` : '',
+            zoomed ? 'zoom' : '',
+          ]
+            .filter(Boolean)
+            .join('  ')
+
+  /** One diff row: cursor mark, line number, gutter, then the visible window of code. */
+  const diffRow = (row, index) => {
+    const drafted = row.line && draftAt.has(draftKey(path, row.kind === 'del' ? 'deletions' : 'additions', row.line))
+    const selected = index === cursor
+
+    if (row.kind === 'hunk') {
+      // A rule rather than a bare @@ — it is a seam in the file, and reads as
+      // one only if it spans the pane.
+      const label = ` ${row.text} `
+      return h(
+        Text,
+        { key: index, wrap: 'truncate', color: theme.diff.hunk, dimColor: true },
+        `  ${label}${'─'.repeat(Math.max(0, inner(diffWidth) - label.length - 3))}`,
+      )
+    }
+
+    const lineBg = row.kind === 'add' ? theme.diff.addBg : row.kind === 'del' ? theme.diff.delBg : theme.diff.contextBg
+    const wordBg = row.kind === 'add' ? theme.diff.addWordBg : theme.diff.delWordBg
+    const mark = row.kind === 'add' ? theme.diff.addMark : row.kind === 'del' ? theme.diff.delMark : undefined
+
+    const clipped = segmentsWidth(row.segments) > hOffset + codeWidth
+    const visible = sliceSegments(row.segments, hOffset, clipped ? codeWidth - 1 : codeWidth).map((segment) => ({
+      ...segment,
+      bg: segment.word ? wordBg : lineBg,
+    }))
+    const code = padSegments(clipped ? [...visible, { text: '›', color: theme.ui.muted, bg: lineBg }] : visible, codeWidth, {
+      bg: lineBg,
+    })
+
+    return h(
+      Text,
+      { key: index, wrap: 'truncate' },
+      h(Text, { color: drafted ? theme.ui.draft : theme.ui.cursor, bold: true }, drafted ? '▌' : selected ? '▸' : ' '),
+      h(
+        Text,
+        { color: theme.diff.lineNumber, backgroundColor: lineBg, inverse: selected, dimColor: !selected },
+        String(row.line ?? '').padStart(5) + ' ',
+      ),
+      h(Text, { color: mark, backgroundColor: lineBg }, row.kind === 'add' ? '+' : row.kind === 'del' ? '-' : ' '),
+      ...code.map((segment, j) =>
+        h(Text, { key: j, color: segment.color, backgroundColor: segment.bg }, segment.text),
+      ),
+    )
+  }
+
+  const counts = useMemo(() => {
+    const tally = new Map()
+    for (const finding of review.findings) tally.set(finding.severity, (tally.get(finding.severity) ?? 0) + 1)
+    return [...tally.entries()]
+  }, [review])
+
+  const KEYS = {
+    tree: '[j/k] move  [[/]] slice  [tab] pane  [n/p] finding  [q] quit',
+    diff: '[j/k] line  [h/l] scroll  [0] reset  [z] zoom  [c] comment  [s/A/R] submit',
+    findings: '[j/k] scroll  [n/p] finding  [c] comment  [tab] pane  [q] quit',
+  }
 
   return h(
     Box,
@@ -540,13 +725,30 @@ function App({ review, reviewPath, ink }) {
         Text,
         { wrap: 'truncate' },
         h(Text, { bold: true }, review.target.title),
-        h(Text, { color: 'gray' }, `  ${review.target.kind === 'pr' ? `#${review.target.number}` : review.target.headRef} · ${review.target.author}`),
+        h(
+          Text,
+          { color: theme.ui.muted },
+          `  ${review.target.kind === 'pr' ? `#${review.target.number}` : review.target.headRef} · ${review.target.author}`,
+        ),
       ),
       h(
         Text,
-        { color: 'gray', wrap: 'truncate' },
-        `${review.slices.length} slices · ${Object.keys(review.files).length} files · ${review.findings.length} findings · risk `,
-        h(Text, { color: RISK[review.overview.risk] ?? 'gray' }, review.overview.risk),
+        { wrap: 'truncate' },
+        h(
+          Text,
+          { color: theme.ui.muted },
+          `${review.slices.length} slices · ${Object.keys(review.files).length} files · `,
+        ),
+        // The severity mix, not just a total: eight findings that are all nits
+        // and eight that are all bugs are different reviews.
+        ...(counts.length
+          ? counts.flatMap(([severity, count], i) => [
+              h(Text, { key: `g${i}`, color: ui.severity(severity).color }, `${ui.severity(severity).glyph} `),
+              h(Text, { key: `c${i}`, color: theme.ui.muted }, `${count}${i === counts.length - 1 ? ' ' : '  '}`),
+            ])
+          : [h(Text, { key: 'none', color: theme.ui.muted }, 'no findings ')]),
+        h(Text, { color: theme.ui.muted }, '· risk '),
+        h(Text, { color: theme.risk[review.overview.risk] ?? theme.ui.muted }, review.overview.risk),
       ),
     ),
 
@@ -554,73 +756,98 @@ function App({ review, reviewPath, ink }) {
       Box,
       { flexDirection: 'row', flexGrow: 1 },
 
-      h(
-        Pane,
-        { title: 'SLICES', number: 1, focused: focus === 'tree', width: treeWidth },
-        ...tree.slice(treeTop, treeTop + bodyHeight).map((row, i) => {
-          const index = treeTop + i
-          const selected = index === treeIndex
-          if (row.type === 'overview') {
-            return h(Text, { key: index, bold: true, inverse: selected, color: selected ? 'cyan' : 'white', wrap: 'truncate' }, 'Overview')
-          }
-          if (row.type === 'drafts') {
-            return h(
-              Text,
-              { key: index, bold: true, inverse: selected, color: selected ? 'cyan' : drafts.length ? 'green' : 'gray', wrap: 'truncate' },
-              `Draft review${drafts.length ? ` (${drafts.length})` : ''}`,
-            )
-          }
-          if (row.type === 'slice') {
-            const s = review.slices[row.sliceIndex]
-            return h(
-              Text,
-              { key: index, bold: true, inverse: selected, color: selected ? 'cyan' : s.kind === 'unaccounted' ? 'yellow' : 'white', wrap: 'truncate' },
-              `${row.sliceIndex + 1} · ${s.title}`,
-            )
-          }
-          const count = countFor(review, row.path)
-          return h(
-            Text,
-            { key: index, inverse: selected, color: selected ? 'cyan' : undefined, wrap: 'truncate' },
-            `  ${row.path.split('/').pop()}${count ? ` (${count})` : ''}`,
-          )
-        }),
-      ),
+      zoomed
+        ? null
+        : h(
+            Pane,
+            {
+              title: 'SLICES',
+              number: 1,
+              focused: focus === 'tree',
+              width: treeWidth,
+              theme,
+              total: tree.length,
+              top: treeTop,
+              height: bodyHeight,
+            },
+            ...tree.slice(treeTop, treeTop + bodyHeight).map((row, i) => {
+              const index = treeTop + i
+              const selected = index === treeIndex
+              const base = { key: index, inverse: selected, wrap: 'truncate' }
 
-      h(
-        Pane,
-        { title: centreTitle, number: 2, focused: focus === 'diff', width: diffWidth },
-        centre
-          ? h(Lines, { lines: centre, top: centreTop, height: bodyHeight })
-          : loading
-            ? h(Text, { color: 'gray' }, 'highlighting…')
-            : rows.slice(centreTop, centreTop + bodyHeight).map((row, i) => {
-                const index = centreTop + i
-                const drafted =
-                  row.line && draftAt.has(draftKey(path, row.kind === 'del' ? 'deletions' : 'additions', row.line))
+              if (row.type === 'overview') {
+                return h(Text, { ...base, bold: true, color: selected ? theme.ui.accent : undefined }, 'Overview')
+              }
+              if (row.type === 'drafts') {
                 return h(
                   Text,
-                  { key: index, wrap: 'truncate' },
-                  h(Text, { color: drafted ? 'green' : 'cyan', bold: true }, drafted ? '▌' : index === cursor ? '▸' : ' '),
-                  h(Text, { color: 'gray', inverse: index === cursor }, String(row.line ?? '').padStart(5) + ' '),
-                  row.gutter,
-                  row.ansi,
+                  {
+                    ...base,
+                    bold: true,
+                    color: selected ? theme.ui.accent : drafts.length ? theme.ui.draft : theme.ui.muted,
+                  },
+                  `Draft review${drafts.length ? ` (${drafts.length})` : ''}`,
                 )
-              }),
-      ),
+              }
+              if (row.type === 'slice') {
+                const s = review.slices[row.sliceIndex]
+                return h(
+                  Text,
+                  { ...base, bold: true, color: selected ? theme.ui.accent : (ui.sliceKind(s.kind).color ?? undefined) },
+                  `${row.sliceIndex + 1} · ${s.title}`,
+                )
+              }
+
+              const fileFindings = findingsFor(review, row.path)
+              return h(
+                Text,
+                base,
+                h(Text, { color: theme.ui.border, dimColor: true }, row.last ? ' └ ' : ' ├ '),
+                h(Text, { color: selected ? theme.ui.accent : undefined }, row.path.split('/').pop()),
+                ...severityGlyphs(fileFindings, ui, 3).map((segment, j) =>
+                  h(Text, { key: j, color: segment.color }, j === 0 ? ` ${segment.text}` : segment.text),
+                ),
+              )
+            }),
+          ),
 
       h(
         Pane,
         {
-          title: `FINDINGS${findings.length ? ` ${Math.min(active + 1, findings.length)}/${findings.length}` : ''}`,
-          number: 3,
-          focused: focus === 'findings',
-          width: findWidth,
+          title: centreTitle,
+          number: 2,
+          focused: focus === 'diff',
+          width: diffWidth,
+          theme,
+          total: centre ? centre.length : rows.length,
+          top: centreTop,
+          height: bodyHeight,
         },
-        findings.length === 0
-          ? h(Text, { color: 'gray' }, path ? 'none for this file' : 'none')
-          : h(Lines, { lines: found.lines, top: foundTop, height: bodyHeight }),
+        centre
+          ? h(Lines, { lines: centre, top: centreTop, height: bodyHeight })
+          : loading
+            ? h(Text, { color: theme.ui.muted }, 'highlighting…')
+            : rows.slice(centreTop, centreTop + bodyHeight).map((row, i) => diffRow(row, centreTop + i)),
       ),
+
+      zoomed
+        ? null
+        : h(
+            Pane,
+            {
+              title: `FINDINGS${findings.length ? ` ${Math.min(active + 1, findings.length)}/${findings.length}` : ''}`,
+              number: 3,
+              focused: focus === 'findings',
+              width: findWidth,
+              theme,
+              total: found.lines.length,
+              top: foundTop,
+              height: bodyHeight,
+            },
+            findings.length === 0
+              ? h(Text, { color: theme.ui.muted }, path ? 'none for this file' : 'none')
+              : h(Lines, { lines: found.lines, top: foundTop, height: bodyHeight }),
+          ),
     ),
 
     h(
@@ -628,11 +855,7 @@ function App({ review, reviewPath, ink }) {
       { paddingX: 1 },
       status
         ? h(Text, { color: status.tone, wrap: 'truncate' }, status.text)
-        : h(
-            Text,
-            { color: 'gray', wrap: 'truncate' },
-            `[1/2/3|tab] panel  [j/k] move  [[/]] slice  [n/p] finding  [c] comment  [s/A/R] submit  [q] quit`,
-          ),
+        : h(Text, { color: theme.ui.muted, wrap: 'truncate' }, KEYS[focus]),
     ),
   )
 }
@@ -645,9 +868,13 @@ if (!file) {
 
 const review = JSON.parse(readFileSync(file, 'utf8'))
 
+const ui = viewerConfig({ review, cwd: process.env.PR_REVIEW_REPO ?? process.cwd() })
+ui.syntax = await resolveSyntaxTheme(ui.theme.syntax)
+setMarkdownTheme(ui.theme.markdown)
+
 // Warm Shiki before first paint: markdown renders inside a useMemo, so there
 // is no opportunity to await a highlighter once the app is running.
-setCodeHighlighter(await codeHighlighter())
+setCodeHighlighter(await codeHighlighter(ui.syntax))
 
 // Alternate screen buffer, so quitting restores the shell's scrollback.
 process.stdout.write('\x1b[?1049h')
@@ -656,6 +883,6 @@ process.stdout.write('\x1b[?1049h')
 // screen, and only the render instance can do that — which does not exist
 // until render() returns. Hence the holder.
 const ink = {}
-ink.instance = render(h(App, { review, reviewPath: file, ink }), { exitOnCtrlC: false })
+ink.instance = render(h(App, { review, reviewPath: file, ink, ui }), { exitOnCtrlC: false })
 await ink.instance.waitUntilExit()
 process.stdout.write('\x1b[?1049l')

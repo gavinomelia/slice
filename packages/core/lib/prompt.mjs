@@ -2,11 +2,34 @@
  * The analysis prompt. Runs via `claude -p` with the repo as cwd, so the model
  * can read callers, conventions, and sibling implementations — context a bare
  * API call against the diff alone would not have.
+ *
+ * The prompt is assembled from named sections so a repo can bend any of them
+ * without forking the whole thing. Two parts are deliberately not
+ * configurable: the framing that tells the model where the patch is, and the
+ * output schema. `merge.mjs` and both viewers are built against that schema,
+ * so a repo that changed it would produce a review nothing could read.
+ *
+ * The taxonomies are the exception that proves the rule — severities and slice
+ * kinds ARE configurable, and flow from config into the prompt, the schema,
+ * and the viewer's glyphs together, so they can never drift apart.
  */
-export function analysisPrompt({ patchPath, filesPath, target, conventionFiles = [] }) {
-  const conventions = conventionFiles.length
-    ? `
-## Project conventions
+import { readFileSync } from 'node:fs'
+import { isAbsolute, join } from 'node:path'
+
+import { DEFAULT_CONFIG, promptSection } from '@pr-review/config'
+
+/** `- \`bug\` — wrong behavior now…`, one per configured severity. */
+const taxonomyList = (entries) =>
+  Object.entries(entries ?? {})
+    .map(([name, meta]) => `- \`${name}\` — ${meta?.description ?? ''}`.trimEnd())
+    .join('\n')
+
+const enumList = (entries) => Object.keys(entries ?? {}).join('|')
+
+const conventionsSection = (conventionFiles) =>
+  conventionFiles.length === 0
+    ? ''
+    : `## Project conventions
 
 This repo states the standards this change must be judged against:
 
@@ -24,30 +47,8 @@ Cite the convention by name in the finding, and prefer a finding grounded in a
 documented convention over a generic one. A best practice asserted against a
 project that documents the opposite is worse than saying nothing.
 `
-    : ''
 
-  return `You are producing a structured code review of a pull request. Your output
-is consumed by a viewer application, not read as prose.
-
-## The change under review
-
-- Title: ${target.title}
-- Author: ${target.author}
-- ${target.kind === 'pr' ? `PR #${target.number} in ${target.repo}` : `Local branch ${target.headRef}`}
-- Base: ${target.baseRef}
-
-The full unified diff is at \`${patchPath}\`. Read it.
-
-The exact list of changed files, already parsed, is at \`${filesPath}\`. Every
-path you emit MUST come from that list, character for character. Never invent,
-abbreviate, or reconstruct a path.
-
-You have the repo checked out at the current working directory. Read beyond the
-diff whenever a judgment depends on it — callers of a changed method, the
-sibling implementation a new file should have matched, the factory a spec
-relies on. Use Grep to find callers before claiming a change breaks them.
-${conventions}
-## Step 1: Slice the change
+const slicingSection = (sliceKinds) => `## Step 1: Slice the change
 
 Group the changed files into slices. A slice is the set of files that together
 deliver **one behavioral change** — a migration, the model, the controller, the
@@ -65,16 +66,12 @@ Rules:
 - Give each slice a short title naming the behavior ("Archive forms",
   "Country code prefix on phone display"), not a restatement of the file names.
 
-Two special slice kinds:
-- \`kind: "skim"\` — lockfiles, generated output, vendored assets, bulk
-  translation dumps. One slice, reviewed as a lump.
-- \`kind: "unaccounted"\` — files that fit no behavioral slice, or that the PR
-  description does not explain. Scope creep and leftover debugging live here,
-  so surface them rather than burying them in a related slice.
+Set each slice's \`kind\` to one of:
 
-Everything else is \`kind: "behavior"\`.
+${taxonomyList(sliceKinds)}
+`
 
-## Step 2: Write summaries
+const SUMMARIES = `## Step 2: Write summaries
 
 **Lead with the user flow, then the mechanism.** Every summary opens by walking
 through what a person using the app does and sees — where they start, what they
@@ -112,22 +109,14 @@ it, and do not stretch to frame plumbing as a feature.
 
 Never narrate the diff line by line. The viewer shows the diff next to your
 text; restating it wastes the reader's attention.
+`
 
-## Step 3: Report findings
+const findingsSection = (severities) => `## Step 3: Report findings
 
 For each real problem, emit a finding. Severities, and the evidence each
 requires:
 
-- \`bug\` — wrong behavior now, on a reachable path. You can name the input
-  that breaks it.
-- \`risk\` — breaks callers, data, or performance under load. You have read the
-  callers or considered the row count.
-- \`cleanup\` — correct but poorly built: antipattern, duplication, logic at the
-  wrong altitude, business logic in a template. You can point at the local
-  pattern it should have followed.
-- \`nit\` — taste. At most two or three in the entire review.
-- \`question\` — you cannot resolve it without author intent, and you looked
-  first.
+${taxonomyList(severities)}
 
 Set \`confidence\` to "confirmed" when you verified the claim by reading the
 relevant code, and "suspected" when you did not. Never state a suspicion as a
@@ -143,8 +132,9 @@ Discipline — these matter more than volume:
   clearest instance — not five findings.
 - Do not report the absence of tests for a file that has a corresponding spec
   in the diff. Check first.
+`
 
-### Anchoring findings to lines
+const ANCHORING = `### Anchoring findings to lines
 
 - \`line\` is a line number in the **new** version of the file, and \`side\` is
   "additions". This is what you want in almost every case.
@@ -156,8 +146,10 @@ Discipline — these matter more than volume:
   diff, set \`line\` to null. It renders at the top of the file. This is always
   safe — prefer it over guessing a line number.
 - \`endLine\` spans a range; set it to null for a single line.
+`
 
-## Output
+/** The one section nothing may override — both viewers are built against it. */
+const outputSchema = ({ severities, sliceKinds }) => `## Output
 
 Your final message must be a single JSON object and nothing else — no prose
 before or after it, no code fence. It must match this shape exactly:
@@ -166,12 +158,12 @@ before or after it, no code fence. It must match this shape exactly:
 {
   "overview": { "intent": "...", "assessment": "...", "risk": "low|medium|high" },
   "slices": [
-    { "id": "kebab-case-id", "title": "...", "kind": "behavior|skim|unaccounted",
+    { "id": "kebab-case-id", "title": "...", "kind": "${enumList(sliceKinds)}",
       "summary": "...", "paths": ["exact/path/from/files.json"] }
   ],
   "notes": [ { "path": "exact/path", "summary": "..." } ],
   "findings": [
-    { "severity": "bug|risk|cleanup|nit|question",
+    { "severity": "${enumList(severities)}",
       "confidence": "confirmed|suspected",
       "path": "exact/path", "line": 42, "endLine": null, "side": "additions",
       "title": "One line naming what is wrong.",
@@ -183,4 +175,80 @@ before or after it, no code fence. It must match this shape exactly:
 
 Include NO diff text, patch text, or file contents in the JSON. The viewer
 already has the diff and renders it alongside your analysis.`
+
+/**
+ * Substitute `{{placeholder}}` values into a repo-supplied prompt file.
+ *
+ * An unrecognised placeholder is left as written rather than blanked, so a
+ * typo shows up in the prompt instead of quietly removing an instruction.
+ */
+function fillTemplate(template, values) {
+  return template.replace(/\{\{([\w.]+)\}\}/g, (whole, key) => values[key] ?? whole)
+}
+
+export function analysisPrompt({
+  patchPath,
+  filesPath,
+  target,
+  repoRoot = process.cwd(),
+  conventionFiles = [],
+  config = DEFAULT_CONFIG,
+}) {
+  const review = config.review ?? DEFAULT_CONFIG.review
+  const { severities, sliceKinds } = review
+
+  const schema = outputSchema({ severities, sliceKinds })
+
+  if (review.promptFile) {
+    const path = isAbsolute(review.promptFile) ? review.promptFile : join(repoRoot, review.promptFile)
+    return fillTemplate(readFileSync(path, 'utf8'), {
+      patchPath,
+      filesPath,
+      conventionFiles: conventionFiles.map((file) => `- \`${file}\``).join('\n'),
+      severities: taxonomyList(severities),
+      sliceKinds: taxonomyList(sliceKinds),
+      outputSchema: schema,
+      'target.title': target.title,
+      'target.author': target.author,
+      'target.repo': target.repo,
+      'target.number': target.number == null ? '' : String(target.number),
+      'target.baseRef': target.baseRef,
+      'target.headRef': target.headRef,
+    })
+  }
+
+  const framing = `You are producing a structured code review of a pull request. Your output
+is consumed by a viewer application, not read as prose.
+
+## The change under review
+
+- Title: ${target.title}
+- Author: ${target.author}
+- ${target.kind === 'pr' ? `PR #${target.number} in ${target.repo}` : `Local branch ${target.headRef}`}
+- Base: ${target.baseRef}
+
+The full unified diff is at \`${patchPath}\`. Read it.
+
+The exact list of changed files, already parsed, is at \`${filesPath}\`. Every
+path you emit MUST come from that list, character for character. Never invent,
+abbreviate, or reconstruct a path.
+
+You have the repo checked out at the current working directory. Read beyond the
+diff whenever a judgment depends on it — callers of a changed method, the
+sibling implementation a new file should have matched, the factory a spec
+relies on. Use Grep to find callers before claiming a change breaks them.
+`
+
+  const sections = [
+    framing,
+    promptSection(review.conventions, conventionsSection(conventionFiles)),
+    promptSection(review.slicing, slicingSection(sliceKinds)),
+    promptSection(review.summaries, SUMMARIES),
+    promptSection(review.findings, findingsSection(severities)),
+    promptSection(review.anchoring, ANCHORING),
+    schema,
+    review.instructions?.trim() ? `\n## Also\n\n${review.instructions.trim()}` : '',
+  ]
+
+  return sections.filter((section) => section.trim()).join('\n')
 }

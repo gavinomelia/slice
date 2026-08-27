@@ -1,11 +1,17 @@
 /**
- * hast -> ANSI. The bridge that makes a TUI viewer possible at all.
+ * hast -> styled segments. The bridge that makes a TUI viewer possible at all.
  *
  * @pierre/diffs' components are web components, but everything under them is
  * headless: getSingularPatch parses, renderDiffWithHighlighter returns hast
- * with Shiki's hex colors inline. This walks that hast and emits truecolor
- * ANSI instead of DOM nodes, so the terminal and the browser render from the
- * exact same tokens.
+ * with Shiki's hex colors inline. This walks that hast into the same
+ * `{ text, color }` segment shape the markdown renderer uses, so the terminal
+ * and the browser render from the exact same tokens.
+ *
+ * Segments rather than pre-baked ANSI, because a flat escape-laden string can
+ * be printed but not manipulated. Keeping the pieces addressable is what lets
+ * a line be sliced for horizontal scrolling, padded to the pane width so the
+ * add/delete tint runs edge to edge, and recoloured from config without
+ * re-parsing the diff.
  */
 import {
   DEFAULT_THEMES,
@@ -15,73 +21,72 @@ import {
   renderDiffWithHighlighter,
 } from '@pierre/diffs'
 
-const RESET = '\x1b[0m'
-const FG_OFF = '\x1b[39m'
-
-const rgb = (hex, layer) => {
-  const n = Number.parseInt(hex.slice(1), 16)
-  return `\x1b[${layer};2;${(n >> 16) & 255};${(n >> 8) & 255};${n & 255}m`
-}
-
-const fg = (hex) => rgb(hex, 38)
-const bg = (hex) => rgb(hex, 48)
-
-/** Line backgrounds, dark enough to sit under Shiki's foreground colors. */
-const LINE_BG = { add: bg('#0b2c18'), del: bg('#3a1114'), ctx: '' }
-/** Word-level intra-line changes get a stronger tint (jsdiff drives these). */
-const WORD_BG = { add: bg('#1c5c31'), del: bg('#6b1f26'), ctx: '' }
-
-const GUTTER = {
-  add: fg('#3fb950') + '+' + FG_OFF,
-  del: fg('#f85149') + '-' + FG_OFF,
-  ctx: ' ',
+/**
+ * Expand tabs against the running column, not per-segment.
+ *
+ * A tab advances to the next multiple of `tabWidth` from wherever the line
+ * currently is, so expanding each segment in isolation would misalign every
+ * indented block. Terminals also render a raw tab as a jump the column
+ * arithmetic behind horizontal scrolling cannot see, which is the real reason
+ * this has to happen here rather than being left to the terminal.
+ */
+function expandTabs(text, column, tabWidth) {
+  if (!text.includes('\t')) return text
+  let out = ''
+  let at = column
+  for (const char of text) {
+    if (char === '\t') {
+      const width = tabWidth - (at % tabWidth)
+      out += ' '.repeat(width)
+      at += width
+    } else {
+      out += char
+      at++
+    }
+  }
+  return out
 }
 
 /**
- * Walk one line's hast into ANSI.
+ * Walk one line's hast into segments.
  *
- * Text nodes emit `fg + text` and reset only the foreground, never the whole
- * SGR state — a full reset would drop the line background midway and leave the
- * add/del tint striped across the row.
+ * `word` marks a span jsdiff flagged as an intra-line change, so the viewer
+ * can tint just the characters that actually differ rather than the row.
  */
-function lineToAnsi(node, kind) {
-  const base = LINE_BG[kind]
+function lineToSegments(node, tabWidth) {
   const out = []
+  let column = 0
 
-  const walk = (n, color, bgNow) => {
+  const walk = (n, color, word) => {
     if (n.type === 'text') {
-      out.push(bgNow + (color ? fg(color) : '') + n.value.replace(/\n$/, '') + FG_OFF)
+      const text = expandTabs(n.value.replace(/\n$/, ''), column, tabWidth)
+      if (!text) return
+      column += text.length
+      out.push(word ? { text, color, word } : { text, color })
       return
     }
+
     let nextColor = color
-    let nextBg = bgNow
+    let nextWord = word
     const style = n.properties?.style
     if (typeof style === 'string') {
       const match = /color:\s*(#[0-9a-fA-F]{6})/.exec(style)
       if (match) nextColor = match[1]
     }
-    if (n.properties?.['data-diff-span'] !== undefined) nextBg = WORD_BG[kind] || bgNow
-    for (const child of n.children ?? []) walk(child, nextColor, nextBg)
+    if (n.properties?.['data-diff-span'] !== undefined) nextWord = true
+
+    for (const child of n.children ?? []) walk(child, nextColor, nextWord)
   }
 
-  for (const child of node.children ?? []) walk(child, null, base)
-  return base + out.join('') + RESET
+  for (const child of node.children ?? []) walk(child, undefined, false)
+  return out
 }
 
-/** The same line as plain text, for seeding $EDITOR with diff context. */
-function lineToText(node) {
-  let out = ''
-  const walk = (n) => {
-    if (n.type === 'text') out += n.value
-    else for (const child of n.children ?? []) walk(child)
-  }
-  walk(node)
-  return out.replace(/\n$/, '')
-}
+const segmentsToText = (segments) => segments.map((segment) => segment.text).join('')
 
 /** Shared across files; passing `langs` loads incrementally into the same instance. */
-export function highlighter(lang) {
-  return getSharedHighlighter({ langs: lang ? [lang] : [], themes: [DEFAULT_THEMES.dark] })
+export function highlighter(lang, theme = DEFAULT_THEMES.dark) {
+  return getSharedHighlighter({ langs: lang ? [lang] : [], themes: [theme] })
 }
 
 /** Languages worth having warm for fenced blocks inside a finding's `fix`. */
@@ -94,8 +99,8 @@ const FIX_LANGS = ['ruby', 'javascript', 'typescript', 'erb', 'html', 'css', 'sc
  * useMemo — there is nowhere to await. Languages are loaded one at a time so
  * one unsupported id doesn't take the whole set down with it.
  */
-export async function codeHighlighter() {
-  const hl = await getSharedHighlighter({ langs: [], themes: [DEFAULT_THEMES.dark] })
+export async function codeHighlighter(theme = DEFAULT_THEMES.dark) {
+  const hl = await getSharedHighlighter({ langs: [], themes: [theme] })
 
   for (const lang of FIX_LANGS) {
     try {
@@ -111,11 +116,28 @@ export async function codeHighlighter() {
     const use = loaded.has(lang) ? lang : null
     if (!use) return null
     try {
-      const { tokens } = hl.codeToTokens(code, { lang: use, theme: DEFAULT_THEMES.dark })
+      const { tokens } = hl.codeToTokens(code, { lang: use, theme })
       return tokens.map((line) => line.map((token) => ({ text: token.content, color: token.color })))
     } catch {
       return null
     }
+  }
+}
+
+/**
+ * Resolve a configured syntax theme, falling back rather than failing.
+ *
+ * A typo in a theme name should cost you the theme, not the review — Shiki
+ * throws on an unknown id, and there is nothing useful to do with that
+ * exception three panes deep in a render.
+ */
+export async function resolveSyntaxTheme(name) {
+  const wanted = name ?? DEFAULT_THEMES.dark
+  try {
+    await getSharedHighlighter({ langs: [], themes: [wanted] })
+    return wanted
+  } catch {
+    return DEFAULT_THEMES.dark
   }
 }
 
@@ -127,7 +149,7 @@ export async function codeHighlighter() {
  * stepping those two cursors. Context lines appear in both arrays — we read
  * them from the addition side so the gutter shows post-change line numbers.
  */
-export async function buildRows(file) {
+export async function buildRows(file, { theme = DEFAULT_THEMES.dark, tabWidth = 4 } = {}) {
   const diff = getSingularPatch(file.patch)
   diff.lang ??= getFiletypeFromFileName(file.path)
 
@@ -135,14 +157,14 @@ export async function buildRows(file) {
   // plain text, which still gives correct gutters and add/del tints.
   let hl
   try {
-    hl = await highlighter(diff.lang)
+    hl = await highlighter(diff.lang, theme)
   } catch {
-    hl = await highlighter(null)
+    hl = await highlighter(null, theme)
     diff.lang = undefined
   }
 
   const { code } = renderDiffWithHighlighter(diff, hl, {
-    theme: DEFAULT_THEMES.dark,
+    theme,
     useTokenTransformer: false,
     tokenizeMaxLineLength: 2000,
     lineDiffType: 'word',
@@ -152,17 +174,24 @@ export async function buildRows(file) {
   const rows = []
   const push = (kind, node) => {
     if (!node) return
+    const segments = lineToSegments(node, tabWidth)
     rows.push({
       kind,
       line: node.properties?.['data-line'] ?? null,
-      gutter: GUTTER[kind],
-      ansi: lineToAnsi(node, kind),
-      text: lineToText(node),
+      segments,
+      // Plain text alongside, for seeding $EDITOR with diff context and for
+      // measuring the widest line without re-walking segments.
+      text: segmentsToText(segments),
     })
   }
 
   for (const hunk of diff.hunks) {
-    rows.push({ kind: 'hunk', line: null, gutter: ' ', ansi: `\x1b[2m${hunk.hunkSpecs ?? '@@'}${RESET}` })
+    // hunkSpecs keeps the newline it was parsed with. A newline inside an Ink
+    // <Text> silently becomes an extra row, which overflows the frame and puts
+    // Ink into clear-and-redraw — the torn-frame failure the height budget in
+    // the viewer is guarding against.
+    const text = (hunk.hunkSpecs ?? '@@').trim()
+    rows.push({ kind: 'hunk', line: null, segments: [{ text }], text })
     for (const entry of hunk.hunkContent) {
       if (entry.type === 'context') {
         for (let i = 0; i < entry.lines; i++) push('ctx', code.additionLines[entry.additionLineIndex + i])

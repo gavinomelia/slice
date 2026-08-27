@@ -5,6 +5,9 @@ import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
+import { configTargets, loadConfig } from '@pr-review/config'
+import { configTemplate } from '@pr-review/config/template'
+
 import { splitPatch } from '../lib/patch.mjs'
 import { bareReview, mergeReview } from '../lib/merge.mjs'
 import { analysisPrompt } from '../lib/prompt.mjs'
@@ -35,6 +38,14 @@ Options:
   --port <n>        dev server port for --web (default 5273)
   --timeout <s>     give up on the analysis after this many seconds (default 600)
   -h, --help        show this
+
+Configuration:
+  --config <path>       use this config file instead of the discovered ones
+  --print-config        show the resolved config and where each layer came from
+  --init-config [where] write a starter config — "repo" (default) or "user"
+
+  Discovered from .pr-review.jsonc in the repo, then ~/.config/pr-review/config.jsonc.
+  The repo layer says how the code is reviewed; the user layer, how it looks.
 `
 
 function fail(message) {
@@ -64,12 +75,21 @@ function parseArgs(argv) {
     web: false,
     port: '5273',
     timeout: 600,
+    config: null,
+    printConfig: false,
+    initConfig: null,
   }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '-h' || arg === '--help') {
       console.log(USAGE.trim())
       process.exit(0)
+    } else if (arg === '--config') options.config = argv[++i]
+    else if (arg === '--print-config') options.printConfig = true
+    else if (arg === '--init-config') {
+      // The scope is optional, so only consume the next argument when it is
+      // one — otherwise `--init-config 1679` would eat the PR number.
+      options.initConfig = ['repo', 'user'].includes(argv[i + 1]) ? argv[++i] : 'repo'
     } else if (arg === '--branch') options.branch = true
     else if (arg === '--refresh') options.refresh = true
     else if (arg === '--no-analyze') options.analyze = false
@@ -211,7 +231,15 @@ function limitNotice(...texts) {
  * or CLAUDE.md, claude does not load it on its own — so it has to be named in
  * the prompt or it is silently ignored.
  */
-function conventionSources(repoRoot) {
+function conventionSources(repoRoot, configured) {
+  // An explicit list is taken at its word, minus anything that isn't there —
+  // naming a file that does not exist would tell the model to read nothing.
+  if (Array.isArray(configured)) {
+    const missing = configured.filter((path) => !existsSync(join(repoRoot, path)))
+    for (const path of missing) console.error(`  config names a convention file that does not exist: ${path}`)
+    return configured.filter((path) => !missing.includes(path))
+  }
+
   const found = []
 
   const instructions = join(repoRoot, '.github/instructions')
@@ -228,8 +256,8 @@ function conventionSources(repoRoot) {
   return found
 }
 
-function runAnalysis({ repoRoot, target, patchPath, filesPath, rawPath, timeoutMs, conventionFiles }) {
-  const prompt = analysisPrompt({ patchPath, filesPath, target, conventionFiles })
+function runAnalysis({ repoRoot, target, patchPath, filesPath, rawPath, timeoutMs, conventionFiles, config }) {
+  const prompt = analysisPrompt({ patchPath, filesPath, target, repoRoot, conventionFiles, config })
 
   // claude -p emits nothing until it finishes, so without a ticker a run that
   // legitimately takes minutes is indistinguishable from a hang.
@@ -240,7 +268,16 @@ function runAnalysis({ repoRoot, target, patchPath, filesPath, rawPath, timeoutM
 
   const child = spawn(
     'claude',
-    ['-p', prompt, '--output-format', 'json', '--allowed-tools', 'Read', 'Grep', 'Glob'],
+    [
+      '-p',
+      prompt,
+      '--output-format',
+      'json',
+      ...(config.review.model ? ['--model', config.review.model] : []),
+      // An empty list means "no tools", which is a bare --allowed-tools that
+      // would swallow the next argument. Omit the flag instead.
+      ...(config.review.allowedTools?.length ? ['--allowed-tools', ...config.review.allowedTools] : []),
+    ],
     { cwd: repoRoot, stdio: ['ignore', 'pipe', 'pipe'] },
   )
 
@@ -316,11 +353,39 @@ function openBrowser(url) {
   }
 }
 
+/** `--init-config`: write a starter file, never over an existing one. */
+function initConfig(scope, repoRoot) {
+  const path = configTargets(repoRoot)[scope]
+  if (existsSync(path)) fail(`${path} already exists — edit it, or delete it first`)
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, configTemplate(scope))
+  console.log(`\n  wrote ${path}\n\n  Everything in it is commented out; uncomment what you want to change.\n`)
+}
+
+/** `--print-config`: the resolved result, and which files produced it. */
+function printConfig({ config, sources }) {
+  console.log(`\n  ${sources.length ? sources.join('\n  ') : 'no config files found — these are the built-in defaults'}\n`)
+  console.log(JSON.stringify(config, null, 2))
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2))
 
   const repoRoot = tryRun('git', ['rev-parse', '--show-toplevel'])
   if (!repoRoot) fail('not inside a git repository')
+
+  if (options.initConfig) return initConfig(options.initConfig, repoRoot)
+
+  let loaded
+  try {
+    loaded = loadConfig({ cwd: repoRoot, explicit: options.config })
+  } catch (error) {
+    fail(error.message)
+  }
+  const { config, sources, warnings: configWarnings } = loaded
+  for (const warning of configWarnings) console.error(`  ${warning}`)
+
+  if (options.printConfig) return printConfig({ config, sources })
 
   const target = options.branch
     ? resolveBranchTarget(repoRoot, options.base)
@@ -383,10 +448,11 @@ async function main() {
     }
 
     if (!analysis) {
-      const conventionFiles = conventionSources(repoRoot)
+      const conventionFiles = conventionSources(repoRoot, config.review.conventionFiles)
       if (conventionFiles.length > 0) {
         console.log(`  judging against ${conventionFiles.join(', ')}`)
       }
+      if (sources.length > 0) console.log(`  configured by ${sources.join(', ')}`)
 
       analysis = await runAnalysis({
         repoRoot,
@@ -396,6 +462,7 @@ async function main() {
         rawPath,
         timeoutMs: options.timeout * 1000,
         conventionFiles,
+        config,
       })
     }
 
@@ -408,8 +475,8 @@ async function main() {
   }
 
   const { review, warnings } = analysis
-    ? mergeReview({ target, files, analysis })
-    : { review: bareReview({ target, files }), warnings: [] }
+    ? mergeReview({ target, files, analysis, config })
+    : { review: bareReview({ target, files, config }), warnings: [] }
 
   writeFileSync(reviewPath, JSON.stringify(review, null, 2))
 
@@ -427,9 +494,16 @@ async function main() {
   // second window. `--web` gets the richer surface — line comments and posting
   // a review back to GitHub still only exist there.
   if (!options.web) {
+    // The viewer resolves its own config from PR_REVIEW_REPO, so that opening
+    // a cached review directly themes the same way. Only an explicit --config
+    // has to be handed across.
     const viewer = spawn(process.execPath, [TUI_BIN, reviewPath], {
       stdio: 'inherit',
-      env: { ...process.env, PR_REVIEW_REPO: repoRoot },
+      env: {
+        ...process.env,
+        PR_REVIEW_REPO: repoRoot,
+        ...(options.config ? { PR_REVIEW_CONFIG: options.config } : {}),
+      },
     })
     viewer.on('close', (code) => process.exit(code ?? 0))
     return

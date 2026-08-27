@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "description": "Terminal viewer for a pr-review review.json",
   "type": "module",
-  "bin": { "pr-review-tui": "./bin/pr-review-tui.mjs" },
+  "bin": {
+    "pr-review-tui": "./bin/pr-review-tui.mjs"
+  },
   "exports": {
     ".": "./bin/pr-review-tui.mjs",
     "./render": "./src/render.mjs",
@@ -11,6 +13,7 @@
     "./package.json": "./package.json"
   },
   "dependencies": {
+    "@pr-review/config": "*",
     "@pierre/diffs": "^1.3.6",
     "ink": "^6.6.0",
     "react": "^19.2.8"

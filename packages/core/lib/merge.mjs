@@ -1,3 +1,5 @@
+import { DEFAULT_CONFIG, severityNames, sliceKindNames } from '@pr-review/config'
+
 const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/
 
 /**
@@ -52,10 +54,19 @@ function slugify(value, fallback) {
  * file level rather than discarded, and unsliced files get their own bucket.
  * Returns the review plus a list of what had to be corrected.
  */
-export function mergeReview({ target, files, analysis }) {
+export function mergeReview({ target, files, analysis, config = DEFAULT_CONFIG }) {
   const warnings = []
   const byPath = new Map(files.map((f) => [f.path, f]))
   const lineIndex = new Map(files.map((f) => [f.path, annotatableLines(f.patch)]))
+
+  // Both taxonomies are ordered, and their fallbacks lean on that: an
+  // unrecognised severity becomes the least serious one, an unrecognised slice
+  // kind becomes ordinary behavior. Both are the safe direction to be wrong in
+  // — they under-claim rather than over-claim.
+  const severities = severityNames(config)
+  const kinds = sliceKindNames(config)
+  const fallbackSeverity = severities.at(-1) ?? 'question'
+  const fallbackKind = kinds[0] ?? 'behavior'
 
   const rawSlices = Array.isArray(analysis?.slices) ? analysis.slices : []
   const claimed = new Set()
@@ -85,7 +96,7 @@ export function mergeReview({ target, files, analysis }) {
     slices.push({
       id,
       title: String(slice?.title ?? `Slice ${index + 1}`),
-      kind: ['behavior', 'skim', 'unaccounted'].includes(slice?.kind) ? slice.kind : 'behavior',
+      kind: kinds.includes(slice?.kind) ? slice.kind : fallbackKind,
       summary: String(slice?.summary ?? ''),
       paths,
     })
@@ -97,7 +108,7 @@ export function mergeReview({ target, files, analysis }) {
     slices.push({
       id: 'unsliced',
       title: 'Unsliced',
-      kind: 'unaccounted',
+      kind: kinds.includes('unaccounted') ? 'unaccounted' : fallbackKind,
       summary:
         'These files were not assigned to a slice by the analysis. They still need review — an unsliced file is often one nothing else explains.',
       paths: orphans,
@@ -131,7 +142,7 @@ export function mergeReview({ target, files, analysis }) {
 
     findings.push({
       id: `f${index + 1}`,
-      severity: ['bug', 'risk', 'cleanup', 'nit', 'question'].includes(finding.severity) ? finding.severity : 'question',
+      severity: severities.includes(finding.severity) ? finding.severity : fallbackSeverity,
       confidence: finding.confidence === 'confirmed' ? 'confirmed' : 'suspected',
       path: finding.path,
       line,
@@ -147,6 +158,11 @@ export function mergeReview({ target, files, analysis }) {
     version: 1,
     generatedAt: new Date().toISOString(),
     target,
+    // Carried into the manifest so a viewer draws the taxonomy this review was
+    // actually produced under. Reading it live from config instead would mean
+    // a cached review re-opened after a config change renders severities it
+    // was never allowed to emit.
+    taxonomy: { severities: config.review.severities, sliceKinds: config.review.sliceKinds },
     overview: {
       intent: String(analysis?.overview?.intent ?? ''),
       assessment: String(analysis?.overview?.assessment ?? ''),
@@ -162,17 +178,18 @@ export function mergeReview({ target, files, analysis }) {
 }
 
 /** A viewer-only manifest for when analysis is skipped or failed. */
-export function bareReview({ target, files }) {
+export function bareReview({ target, files, config = DEFAULT_CONFIG }) {
   return {
     version: 1,
     generatedAt: new Date().toISOString(),
     target,
+    taxonomy: { severities: config.review.severities, sliceKinds: config.review.sliceKinds },
     overview: { intent: '', assessment: 'No analysis was run for this review.', risk: 'medium' },
     slices: [
       {
         id: 'all-files',
         title: 'All changed files',
-        kind: 'behavior',
+        kind: sliceKindNames(config)[0] ?? 'behavior',
         summary: 'Analysis was skipped, so files are listed in diff order rather than grouped by behavior.',
         paths: files.map((f) => f.path),
       },

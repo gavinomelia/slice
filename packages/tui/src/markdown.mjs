@@ -14,8 +14,18 @@
 const INLINE =
   /(`[^`\n]+`|\*\*[^*\n]+\*\*|__[^_\n]+__|\*[^*\n]+\*|(?<![\w])_[^_\n]+_(?![\w])|\[[^\]\n]+\]\([^)\n]+\))/
 
-/** Background for inline `code`, so a span reads as code without a fence. */
-const CODE_BG = '#2c2f36'
+/**
+ * Colours, replaced wholesale by the app once config is resolved.
+ *
+ * A module-level setting rather than a parameter because `markdownLines` is
+ * called from a dozen places that have a width and a string and no business
+ * knowing about themes. The built-in values keep this module renderable on its
+ * own, which matters for testing it away from Ink.
+ */
+let colors = { code: 'cyan', codeBg: '#2c2f36', link: 'blue', fence: 'green', quote: 'gray', rule: 'gray' }
+export const setMarkdownTheme = (next) => {
+  colors = { ...colors, ...next }
+}
 
 /**
  * Set by the app once Shiki is warm. `(code, lang) => Segment[][] | null`, one
@@ -25,6 +35,45 @@ const CODE_BG = '#2c2f36'
 let highlightCode = null
 export const setCodeHighlighter = (fn) => {
   highlightCode = fn
+}
+
+/** Total printable width of a line. */
+export const segmentsWidth = (segments) => segments.reduce((total, segment) => total + segment.text.length, 0)
+
+/**
+ * Take the `[from, from + width)` column window of a line, keeping each
+ * surviving piece's styling.
+ *
+ * This is what horizontal scrolling is: the pane truncates, so a line wider
+ * than the pane is unreadable past the edge unless the window can move.
+ */
+export function sliceSegments(segments, from, width) {
+  const out = []
+  const until = from + width
+  let at = 0
+
+  for (const segment of segments) {
+    const end = at + segment.text.length
+    if (end > from && at < until) {
+      out.push({ ...segment, text: segment.text.slice(Math.max(0, from - at), Math.min(segment.text.length, until - at)) })
+    }
+    at = end
+    if (at >= until) break
+  }
+
+  return out
+}
+
+/**
+ * Pad a line out to `width` with a styled run of spaces.
+ *
+ * Diff rows need this: a background that stops where the code stops leaves the
+ * add/delete tint as a ragged right edge instead of a band, and the eye reads
+ * the ragged edge as meaningful.
+ */
+export function padSegments(segments, width, style) {
+  const short = width - segmentsWidth(segments)
+  return short > 0 ? [...segments, { ...style, text: ' '.repeat(short) }] : segments
 }
 
 /** Split one line of markdown into styled segments. */
@@ -44,11 +93,11 @@ export function parseInline(text, base = {}) {
     if (token.startsWith('`')) {
       // Code spans drop the surrounding dim: a greyed-out identifier is the
       // one thing in a finding you most want to be able to read.
-      out.push({ ...base, text: token.slice(1, -1), color: 'cyan', bg: CODE_BG, dim: false })
+      out.push({ ...base, text: token.slice(1, -1), color: colors.code, bg: colors.codeBg, dim: false })
     } else if (token.startsWith('**') || token.startsWith('__')) {
       out.push({ ...base, text: token.slice(2, -2), bold: true })
     } else if (token.startsWith('[')) {
-      out.push({ ...base, text: /\[([^\]]+)\]/.exec(token)[1], color: 'blue', underline: true })
+      out.push({ ...base, text: /\[([^\]]+)\]/.exec(token)[1], color: colors.link, underline: true })
     } else {
       out.push({ ...base, text: token.slice(1, -1), italic: true })
     }
@@ -140,7 +189,7 @@ export function markdownLines(text, width) {
   const flushCode = () => {
     const highlighted = code.length > 0 ? highlightCode?.(code.join('\n'), lang) : null
     code.forEach((raw, i) => {
-      const segments = highlighted?.[i]?.length ? highlighted[i] : [{ text: raw, color: 'green' }]
+      const segments = highlighted?.[i]?.length ? highlighted[i] : [{ text: raw, color: colors.fence }]
       lines.push([{ text: '│ ', dim: true }, ...segments])
     })
     code = []
@@ -169,7 +218,7 @@ export function markdownLines(text, width) {
 
     if (RULE.test(raw)) {
       flushParagraph()
-      lines.push([{ text: '─'.repeat(Math.max(4, Math.min(width, 24))), dim: true }])
+      lines.push([{ text: '─'.repeat(Math.max(4, Math.min(width, 24))), color: colors.rule, dim: true }])
       continue
     }
 
@@ -197,7 +246,7 @@ export function markdownLines(text, width) {
     const quote = QUOTE.exec(raw)
     if (quote) {
       flushParagraph()
-      lines.push(...wrapSegments(parseInline(quote[1], { dim: true }), width, '▏ '))
+      lines.push(...wrapSegments(parseInline(quote[1], { color: colors.quote, dim: true }), width, '▏ '))
       continue
     }
 
