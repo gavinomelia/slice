@@ -336,9 +336,23 @@ function App({ review, reviewPath, ink }) {
     const existing = draftAt.get(key)
     const anchored = review.findings.find((f) => f.path === path && f.line === row.line)
 
+    // A window of the diff around the target, marked so the line being
+    // commented on is unmistakable once the TUI is off screen.
+    const from = Math.max(0, cursor - 8)
+    const context = [
+      `─── ${path} ───`,
+      ...rows.slice(from, cursor + 9).map((r, i) => {
+        const at = from + i
+        if (r.kind === 'hunk') return `        ${r.text ?? '@@'}`
+        const sign = r.kind === 'add' ? '+' : r.kind === 'del' ? '-' : ' '
+        return `${at === cursor ? '  >' : '   '} ${String(r.line ?? '').padStart(5)} ${sign} ${r.text ?? ''}`
+      }),
+    ]
+
     const body = await composeInEditor({
       seed: existing?.body ?? seedFromFinding(anchored),
-      hint: `# Comment on ${path}:${row.line}${side === 'deletions' ? ' (removed line)' : ''}`,
+      hint: `# Comment on ${path}:${row.line}${side === 'deletions' ? ' (a removed line)' : ''}`,
+      context,
       redraw: () => ink.instance?.clear(),
     })
 
@@ -357,9 +371,21 @@ function App({ review, reviewPath, ink }) {
       return setStatus({ tone: 'yellow', text: 'This is a branch diff, not a PR — nothing to post to.' })
     }
 
+    const verb = event === 'APPROVE' ? 'Approving' : event === 'REQUEST_CHANGES' ? 'Requesting changes on' : 'Commenting on'
+    const { comments, orphans } = partitionDrafts(drafts)
+    const context = [
+      `─── ${drafts.length} draft comment(s) will be posted with this ───`,
+      ...comments.map((c) => `  ${c.path}:${c.line}  ${c.body.split('\n')[0].slice(0, 60)}`),
+      ...orphans.map((o) => `  ${o.path} (no line anchor, appended to this body)`),
+      ...(viewerIsAuthor && event !== 'COMMENT'
+        ? ['', '  Note: this is your own PR, so it will post as a plain comment.']
+        : []),
+    ]
+
     const body = await composeInEditor({
       seed: '',
-      hint: `# ${event === 'APPROVE' ? 'Approving' : event === 'REQUEST_CHANGES' ? 'Requesting changes on' : 'Commenting on'} ${repo}#${number} with ${drafts.length} draft comment(s).`,
+      hint: `# ${verb} ${repo}#${number}.`,
+      context,
       redraw: () => ink.instance?.clear(),
     })
 

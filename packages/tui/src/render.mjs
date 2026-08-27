@@ -68,6 +68,17 @@ function lineToAnsi(node, kind) {
   return base + out.join('') + RESET
 }
 
+/** The same line as plain text, for seeding $EDITOR with diff context. */
+function lineToText(node) {
+  let out = ''
+  const walk = (n) => {
+    if (n.type === 'text') out += n.value
+    else for (const child of n.children ?? []) walk(child)
+  }
+  walk(node)
+  return out.replace(/\n$/, '')
+}
+
 /** Shared across files; passing `langs` loads incrementally into the same instance. */
 export function highlighter(lang) {
   return getSharedHighlighter({ langs: lang ? [lang] : [], themes: [DEFAULT_THEMES.dark] })
@@ -146,6 +157,7 @@ export async function buildRows(file) {
       line: node.properties?.['data-line'] ?? null,
       gutter: GUTTER[kind],
       ansi: lineToAnsi(node, kind),
+      text: lineToText(node),
     })
   }
 

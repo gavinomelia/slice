@@ -46,12 +46,24 @@ const stripComments = (text) =>
  * Ink to repaint from scratch — its diffing cache is stale after another
  * program has drawn over the screen.
  */
-export async function composeInEditor({ seed, hint, redraw }) {
+export async function composeInEditor({ seed, hint, context = [], redraw }) {
   const dir = mkdtempSync(join(tmpdir(), 'pr-review-'))
   const file = join(dir, 'COMMENT_EDITMSG.md')
 
-  const header = hint ? `${hint}\n#\n# Lines starting with # are ignored. An empty body discards the draft.\n\n` : ''
-  writeFileSync(file, seed ? `${seed}\n\n${header}` : header)
+  // The editor takes the whole screen, so whatever you were looking at is
+  // gone. Carry it in as comment lines, the way `git commit --verbose` puts
+  // the diff below the message — writing a review comment with no sight of
+  // the code is guesswork.
+  const header = [
+    hint,
+    '#',
+    '# Lines starting with # are ignored. Save empty to discard.',
+    ...(context.length > 0 ? ['#', ...context.map((line) => `# ${line}`.trimEnd())] : []),
+  ]
+    .filter((line) => line != null)
+    .join('\n')
+
+  writeFileSync(file, `${seed ? `${seed}\n` : ''}\n${header}\n`)
 
   const command = process.env.VISUAL || process.env.EDITOR || 'vi'
   const [bin, ...args] = command.split(/\s+/)
