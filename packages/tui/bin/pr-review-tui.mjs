@@ -9,11 +9,13 @@
  * layout is written with createElement. If the spike graduates, add esbuild.
  */
 import { readFileSync } from 'node:fs'
-import { createElement as h, useEffect, useMemo, useState } from 'react'
+import { createElement as h, useEffect, useMemo, useRef, useState } from 'react'
 import { Box, Text, render, useApp, useInput, useStdout } from 'ink'
 
 import { buildRows, codeHighlighter } from '../src/render.mjs'
 import { indentLines, markdownLines, parseInline, plain, setCodeHighlighter, wrapSegments } from '../src/markdown.mjs'
+import { composeInEditor, loadDrafts, saveDrafts, seedFromFinding } from '../src/compose.mjs'
+import { partitionDrafts, postReview } from '../src/github.mjs'
 
 const SEVERITY = {
   bug: { glyph: '●', color: 'red' },
@@ -34,10 +36,55 @@ function buildTree(review) {
       if (review.files[path]) rows.push({ type: 'file', sliceIndex: index, path })
     }
   }
+  // Only a PR can receive a review, so a branch diff gets no drafts row.
+  if (review.target.kind === 'pr' && review.target.number) rows.push({ type: 'drafts' })
   return rows
 }
 
 const countFor = (review, path) => review.findings.filter((f) => f.path === path).length
+
+const draftKey = (path, side, line) => `${path}:${side}:${line ?? 'file'}`
+
+/** The submit surface: what is staged, and what will happen to it. */
+function draftsCard(review, drafts, width) {
+  const { comments, orphans } = partitionDrafts(drafts)
+  const lines = [
+    ...wrapSegments(parseInline('Draft review', { bold: true }), width),
+    plain(
+      `${drafts.length} draft(s) · ${comments.length} as line comments${orphans.length ? ` · ${orphans.length} appended to the body` : ''}`,
+      { color: 'gray' },
+    ),
+    [],
+  ]
+
+  if (drafts.length === 0) {
+    lines.push(...markdownLines('Nothing staged yet. Press `c` on a line in a diff to write a comment.', width))
+  }
+
+  for (const draft of drafts) {
+    lines.push([
+      { text: '▌ ', color: 'green' },
+      { text: draft.path, bold: true },
+      { text: draft.line ? `:${draft.line}` : '  (no line anchor — goes in the body)', color: draft.line ? 'gray' : 'yellow' },
+    ])
+    lines.push(...indentLines(markdownLines(draft.body, width - 4), 2))
+    lines.push([])
+  }
+
+  if (review.target.viewerIsAuthor) {
+    lines.push(
+      ...markdownLines(
+        'GitHub rejects **approve** and **request changes** on your own PR, so both post as plain comments here.',
+        width,
+      ),
+      [],
+    )
+  }
+
+  lines.push(plain('SUBMIT', { color: 'gray', bold: true }))
+  lines.push(...markdownLines('`s` comment · `A` approve · `R` request changes — each opens $EDITOR for the review body first.', width))
+  return lines
+}
 
 /** The card shown in the centre pane when a slice header is selected. */
 function sliceCard(review, slice, width) {
@@ -163,7 +210,7 @@ function windowFor(index, total, height) {
   return Math.max(0, Math.min(index - Math.floor(height / 2), total - height))
 }
 
-function App({ review }) {
+function App({ review, reviewPath, ink }) {
   const { exit } = useApp()
   const { stdout } = useStdout()
 
@@ -178,9 +225,12 @@ function App({ review }) {
 
   const [treeIndex, setTreeIndex] = useState(0)
   const [scroll, setScroll] = useState(0)
+  const [cursor, setCursor] = useState(0)
   const [findingIndex, setFindingIndex] = useState(0)
   const [rows, setRows] = useState([])
   const [loading, setLoading] = useState(false)
+  const [drafts, setDrafts] = useState(() => loadDrafts(reviewPath))
+  const [status, setStatus] = useState(null)
 
   const current = tree[treeIndex]
   const path = current?.type === 'file' ? current.path : null
@@ -198,12 +248,26 @@ function App({ review }) {
 
   // Rebuild the highlighted diff whenever the selected file changes. Guarded
   // against out-of-order resolution so fast j/k can't land stale rows.
+  const pendingLine = useRef(null)
+
   useEffect(() => {
     if (!path) return setRows([])
     let live = true
     setLoading(true)
     buildRows(review.files[path])
-      .then((next) => live && (setRows(next), setScroll(0), setLoading(false)))
+      .then((next) => {
+        if (!live) return
+        setRows(next)
+        setScroll(0)
+        // Landing here from n/p should put the cursor on the finding's line,
+        // not the top of the file — otherwise you have to hunt for it.
+        const at = pendingLine.current
+          ? next.findIndex((r) => r.kind !== 'hunk' && r.line === pendingLine.current)
+          : -1
+        setCursor(at >= 0 ? at : 0)
+        pendingLine.current = null
+        setLoading(false)
+      })
       .catch((error) => live && (setRows([{ kind: 'ctx', gutter: ' ', ansi: `error: ${error.message}` }]), setLoading(false)))
     return () => {
       live = false
@@ -224,13 +288,89 @@ function App({ review }) {
   const centre = useMemo(() => {
     if (current?.type === 'overview') return overviewCard(review, diffWidth - 4)
     if (current?.type === 'slice') return sliceCard(review, slice, diffWidth - 4)
+    if (current?.type === 'drafts') return draftsCard(review, drafts, diffWidth - 4)
     return null
-  }, [review, current, slice, diffWidth])
+  }, [review, current, slice, drafts, diffWidth])
+
+  const draftAt = useMemo(() => {
+    const index = new Map()
+    for (const draft of drafts) index.set(draftKey(draft.path, draft.side, draft.line), draft)
+    return index
+  }, [drafts])
+
+  const persist = (next) => {
+    setDrafts(next)
+    saveDrafts(reviewPath, next)
+  }
+
+  /** Write or edit the draft on the cursor's line; an empty body deletes it. */
+  const commentOnCursor = async () => {
+    const row = rows[cursor]
+    if (!path || !row || row.kind === 'hunk' || !row.line) {
+      return setStatus({ tone: 'yellow', text: 'Put the cursor on a diff line first (↑/↓).' })
+    }
+
+    const side = row.kind === 'del' ? 'deletions' : 'additions'
+    const key = draftKey(path, side, row.line)
+    const existing = draftAt.get(key)
+    const anchored = review.findings.find((f) => f.path === path && f.line === row.line)
+
+    const body = await composeInEditor({
+      seed: existing?.body ?? seedFromFinding(anchored),
+      hint: `# Comment on ${path}:${row.line}${side === 'deletions' ? ' (removed line)' : ''}`,
+      redraw: () => ink.instance?.clear(),
+    })
+
+    const without = drafts.filter((d) => draftKey(d.path, d.side, d.line) !== key)
+    if (!body) {
+      persist(without)
+      return setStatus(existing ? { tone: 'gray', text: 'Draft discarded.' } : null)
+    }
+    persist([...without, { path, line: row.line, side, body }])
+    setStatus({ tone: 'green', text: `Draft saved on ${path}:${row.line}.` })
+  }
+
+  const submit = async (event) => {
+    const { repo, number, viewerIsAuthor } = review.target
+    if (review.target.kind !== 'pr' || !number) {
+      return setStatus({ tone: 'yellow', text: 'This is a branch diff, not a PR — nothing to post to.' })
+    }
+
+    const body = await composeInEditor({
+      seed: '',
+      hint: `# ${event === 'APPROVE' ? 'Approving' : event === 'REQUEST_CHANGES' ? 'Requesting changes on' : 'Commenting on'} ${repo}#${number} with ${drafts.length} draft comment(s).`,
+      redraw: () => ink.instance?.clear(),
+    })
+
+    setStatus({ tone: 'gray', text: 'Posting…' })
+    const result = await postReview({
+      repo,
+      number,
+      event,
+      body,
+      drafts,
+      viewerIsAuthor,
+      cwd: process.env.PR_REVIEW_REPO ?? process.cwd(),
+    })
+
+    if (!result.ok) return setStatus({ tone: 'red', text: result.error })
+
+    // The drafts are on GitHub now; keeping them would re-post on the next
+    // submit.
+    persist([])
+    const notes = [
+      `Posted ${result.count} comment(s)`,
+      result.downgraded ? 'downgraded to a plain comment (your own PR)' : null,
+      result.orphanCount ? `${result.orphanCount} appended to the body` : null,
+    ].filter(Boolean)
+    setStatus({ tone: 'green', text: `${notes.join(' · ')}. ${result.url ?? ''}`.trim() })
+  }
 
   const found = useMemo(() => findingLines(findings, active, findWidth - 4), [findings, active, findWidth])
 
   const selectFinding = (finding) => {
     const at = tree.findIndex((r) => r.type === 'file' && r.path === finding.path)
+    pendingLine.current = finding.line ?? null
     if (at >= 0) setTreeIndex(at)
     const within = review.findings.filter((f) => f.path === finding.path).indexOf(finding)
     setFindingIndex(Math.max(0, within))
@@ -238,9 +378,14 @@ function App({ review }) {
 
   const moveTree = (delta) => setTreeIndex((i) => Math.max(0, Math.min(tree.length - 1, i + delta)))
 
+  // On a card there is nothing to point at, so the body scrolls. On a diff the
+  // cursor moves and the window follows it — commenting needs a target line.
   const scrollBody = (delta) => {
-    const max = Math.max(0, (centre ? centre.length : rows.length) - bodyHeight)
-    setScroll((s) => Math.max(0, Math.min(max, s + delta)))
+    if (centre) {
+      const max = Math.max(0, centre.length - bodyHeight)
+      return setScroll((s) => Math.max(0, Math.min(max, s + delta)))
+    }
+    setCursor((c) => Math.max(0, Math.min(rows.length - 1, c + delta)))
   }
 
   // Key repeat arrives coalesced — holding j delivers "jjjj" as one input, and
@@ -260,6 +405,12 @@ function App({ review }) {
   // n/p always walks findings. Nothing on screen changes what a key does.
   function handleKey(input, key) {
     if (input === 'q' || key.escape || (key.ctrl && input === 'c')) return exit()
+
+    if (input === 'c') return void commentOnCursor().catch((e) => setStatus({ tone: 'red', text: e.message }))
+    if (input === 's' || input === 'A' || input === 'R') {
+      const event = input === 'A' ? 'APPROVE' : input === 'R' ? 'REQUEST_CHANGES' : 'COMMENT'
+      return void submit(event).catch((e) => setStatus({ tone: 'red', text: e.message }))
+    }
 
     if (input === 'j') return moveTree(1)
     if (input === 'k') return moveTree(-1)
@@ -291,7 +442,7 @@ function App({ review }) {
   const treeTop = windowFor(treeIndex, tree.length, bodyHeight)
   const centreTop = centre
     ? Math.min(scroll, Math.max(0, centre.length - bodyHeight))
-    : Math.min(scroll, Math.max(0, rows.length - bodyHeight))
+    : windowFor(cursor, rows.length, bodyHeight)
 
   // The active finding scrolls to the top of the pane so its whole expanded
   // body is on screen, rather than being centred and clipped at the bottom.
@@ -299,9 +450,11 @@ function App({ review }) {
 
   const centreTitle = current?.type === 'overview'
     ? 'OVERVIEW'
-    : current?.type === 'slice'
-      ? `SLICE ${current.sliceIndex + 1}/${review.slices.length}`
-      : `${path}${rows.length ? `  ${centreTop + 1}-${Math.min(rows.length, centreTop + bodyHeight)}/${rows.length}` : ''}`
+    : current?.type === 'drafts'
+      ? `DRAFT REVIEW${drafts.length ? ` (${drafts.length})` : ''}`
+      : current?.type === 'slice'
+        ? `SLICE ${current.sliceIndex + 1}/${review.slices.length}`
+        : `${path}${rows.length ? `  L${rows[cursor]?.line ?? '–'}  ${centreTop + 1}-${Math.min(rows.length, centreTop + bodyHeight)}/${rows.length}` : ''}`
 
   return h(
     Box,
@@ -337,6 +490,13 @@ function App({ review }) {
           if (row.type === 'overview') {
             return h(Text, { key: index, bold: true, inverse: selected, color: selected ? 'cyan' : 'white', wrap: 'truncate' }, 'Overview')
           }
+          if (row.type === 'drafts') {
+            return h(
+              Text,
+              { key: index, bold: true, inverse: selected, color: selected ? 'cyan' : drafts.length ? 'green' : 'gray', wrap: 'truncate' },
+              `Draft review${drafts.length ? ` (${drafts.length})` : ''}`,
+            )
+          }
           if (row.type === 'slice') {
             const s = review.slices[row.sliceIndex]
             return h(
@@ -361,17 +521,19 @@ function App({ review }) {
           ? h(Lines, { lines: centre, top: centreTop, height: bodyHeight })
           : loading
             ? h(Text, { color: 'gray' }, 'highlighting…')
-            : rows
-                .slice(centreTop, centreTop + bodyHeight)
-                .map((row, i) =>
-                  h(
-                    Text,
-                    { key: centreTop + i, wrap: 'truncate' },
-                    h(Text, { color: 'gray' }, String(row.line ?? '').padStart(5) + ' '),
-                    row.gutter,
-                    row.ansi,
-                  ),
-                ),
+            : rows.slice(centreTop, centreTop + bodyHeight).map((row, i) => {
+                const index = centreTop + i
+                const drafted =
+                  row.line && draftAt.has(draftKey(path, row.kind === 'del' ? 'deletions' : 'additions', row.line))
+                return h(
+                  Text,
+                  { key: index, wrap: 'truncate' },
+                  h(Text, { color: drafted ? 'green' : 'cyan', bold: true }, drafted ? '▌' : index === cursor ? '▸' : ' '),
+                  h(Text, { color: 'gray', inverse: index === cursor }, String(row.line ?? '').padStart(5) + ' '),
+                  row.gutter,
+                  row.ansi,
+                )
+              }),
       ),
 
       h(
@@ -389,11 +551,13 @@ function App({ review }) {
     h(
       Box,
       { paddingX: 1 },
-      h(
-        Text,
-        { color: 'gray', wrap: 'truncate' },
-        `[j/k] file  [[/]] slice  [n/p] finding  [↑↓] scroll  [space] page  [q] quit`,
-      ),
+      status
+        ? h(Text, { color: status.tone, wrap: 'truncate' }, status.text)
+        : h(
+            Text,
+            { color: 'gray', wrap: 'truncate' },
+            `[j/k] file  [[/]] slice  [n/p] finding  [↑↓] line  [c] comment  [s/A/R] submit  [q] quit`,
+          ),
     ),
   )
 }
@@ -412,6 +576,11 @@ setCodeHighlighter(await codeHighlighter())
 
 // Alternate screen buffer, so quitting restores the shell's scrollback.
 process.stdout.write('\x1b[?1049h')
-const app = render(h(App, { review }), { exitOnCtrlC: false })
-await app.waitUntilExit()
+
+// The app needs to force a full repaint after $EDITOR has drawn over the
+// screen, and only the render instance can do that — which does not exist
+// until render() returns. Hence the holder.
+const ink = {}
+ink.instance = render(h(App, { review, reviewPath: file, ink }), { exitOnCtrlC: false })
+await ink.instance.waitUntilExit()
 process.stdout.write('\x1b[?1049l')
