@@ -24,6 +24,7 @@ Usage:
 
   slice              review the PR for the current branch, or the branch diff
   slice 1679         review PR #1679
+  slice my-branch    review that branch's PR, or diff the branch if it has none
   slice --branch     review the local branch diff, ignoring any open PR
 
 Options:
@@ -52,8 +53,22 @@ function fail(message) {
   process.exit(1)
 }
 
+/**
+ * stderr is captured rather than inherited.
+ *
+ * execFileSync passes a child's stderr straight through unless told not to,
+ * and most calls here are probes whose failure is expected and handled — so
+ * the default leaks things like "fatal: ref refs/remotes/origin/HEAD is not a
+ * symbolic ref" into a run that is working perfectly well. Genuine failures
+ * still carry it, on the thrown error.
+ */
 function run(cmd, args, options = {}) {
-  return execFileSync(cmd, args, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, ...options }).trim()
+  return execFileSync(cmd, args, {
+    encoding: 'utf8',
+    maxBuffer: 256 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    ...options,
+  }).trim()
 }
 
 function tryRun(cmd, args, options = {}) {
@@ -66,7 +81,7 @@ function tryRun(cmd, args, options = {}) {
 
 function parseArgs(argv) {
   const options = {
-    number: null,
+    ref: null,
     branch: false,
     base: null,
     refresh: false,
@@ -97,8 +112,12 @@ function parseArgs(argv) {
     else if (arg === '--no-analyze') options.analyze = false
     else if (arg === '--base') options.base = argv[++i]
     else if (arg === '--timeout') options.timeout = Number(argv[++i]) || 600
-    else if (/^\d+$/.test(arg)) options.number = Number(arg)
-    else fail(`unknown argument "${arg}"\n${USAGE}`)
+    else if (arg.startsWith('-')) fail(`unknown option "${arg}"\n${USAGE}`)
+    else if (options.ref !== null) fail(`only one PR number or branch at a time (got "${options.ref}" and "${arg}")`)
+    // A bare argument is a PR number or a branch name. Which one it is is not
+    // decided here: `gh pr view` accepts either, so the distinction only
+    // matters once we know whether a PR came back.
+    else options.ref = arg
   }
   return options
 }
@@ -125,9 +144,10 @@ function defaultBranch(repoRoot) {
   return 'main'
 }
 
-function resolvePrTarget(repoRoot, number) {
+/** `ref` may be a PR number, a branch name, or a URL — gh resolves all three. */
+function resolvePrTarget(repoRoot, ref) {
   const fields = 'number,title,author,url,baseRefName,headRefName,headRefOid'
-  const args = ['pr', 'view', ...(number ? [String(number)] : []), '--json', fields]
+  const args = ['pr', 'view', ...(ref ? [String(ref)] : []), '--json', fields]
   const raw = tryRun('gh', args, { cwd: repoRoot })
   if (!raw) return null
 
@@ -149,19 +169,38 @@ function resolvePrTarget(repoRoot, number) {
   }
 }
 
-function resolveBranchTarget(repoRoot, base) {
-  const headRef = run('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: repoRoot })
+/**
+ * Diff a branch against its base.
+ *
+ * `ref` names the branch; without one it is whatever is checked out. Returns
+ * null when the named branch does not exist, so the caller can say so rather
+ * than diffing HEAD and pretending it was asked for.
+ *
+ * A branch that exists only on the remote still counts — asking to review a
+ * colleague's branch you have fetched but not checked out is an ordinary
+ * thing to want.
+ */
+function resolveBranchTarget(repoRoot, base, ref = null) {
+  const headRev = ref
+    ? ['refs/heads/' + ref, 'refs/remotes/origin/' + ref].find((candidate) =>
+        tryRun('git', ['rev-parse', '--verify', '--quiet', candidate], { cwd: repoRoot }),
+      )
+    : 'HEAD'
+  if (!headRev) return null
+
+  const headRef = ref ?? run('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: repoRoot })
   const baseRef = base ?? defaultBranch(repoRoot)
   return {
     kind: 'branch',
     repo: tryRun('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'], { cwd: repoRoot }) ?? '',
     number: null,
-    title: tryRun('git', ['log', '-1', '--pretty=%s'], { cwd: repoRoot }) ?? headRef,
+    title: tryRun('git', ['log', '-1', '--pretty=%s', headRev], { cwd: repoRoot }) ?? headRef,
     author: tryRun('git', ['config', 'user.name'], { cwd: repoRoot }) ?? 'you',
     url: null,
     baseRef,
     headRef,
-    headSha: run('git', ['rev-parse', 'HEAD'], { cwd: repoRoot }),
+    headRev,
+    headSha: run('git', ['rev-parse', headRev], { cwd: repoRoot }),
     viewerIsAuthor: true,
   }
 }
@@ -175,7 +214,7 @@ function capturePatch(repoRoot, target) {
   if (!tryRun('git', ['rev-parse', '--verify', target.baseRef], { cwd: repoRoot })) {
     fail(`base ref "${target.baseRef}" does not exist locally`)
   }
-  return run('git', ['diff', `${target.baseRef}...HEAD`], { cwd: repoRoot })
+  return run('git', ['diff', `${target.baseRef}...${target.headRev ?? 'HEAD'}`], { cwd: repoRoot })
 }
 
 /**
@@ -402,18 +441,26 @@ async function main() {
     })
   }
 
-  const target = options.branch
-    ? resolveBranchTarget(repoRoot, options.base)
-    : (resolvePrTarget(repoRoot, options.number) ?? resolveBranchTarget(repoRoot, options.base))
+  // A bare argument is a PR number or a branch, and gh takes either — so try
+  // for a PR first and fall back to diffing the branch. `--branch` skips the
+  // PR lookup entirely.
+  const asBranch = () => resolveBranchTarget(repoRoot, options.base, options.branch ? options.ref : null)
+  const target = options.branch ? asBranch() : (resolvePrTarget(repoRoot, options.ref) ?? resolveBranchTarget(repoRoot, options.base, options.ref))
 
-  if (options.number && target.kind === 'branch') {
+  if (!target) {
     const why = ghDiagnosis(repoRoot)
-    fail(why ? `could not find PR #${options.number} — ${why}` : `could not find PR #${options.number}`)
+    const named = options.ref ? `"${options.ref}"` : 'that branch'
+    fail(
+      /^\d+$/.test(options.ref ?? '')
+        ? `could not find PR #${options.ref}${why ? ` — ${why}` : ''}`
+        : `no pull request and no branch named ${named}${why ? ` — ${why}` : ''}`,
+    )
   }
 
   if (!options.branch && target.kind === 'branch') {
     const why = ghDiagnosis(repoRoot)
     if (why) console.error(`  no PR found: ${why}\n  falling back to a branch diff.`)
+    else if (options.ref) console.error(`  no open PR for "${options.ref}" — diffing the branch instead.`)
   }
 
   const label = target.kind === 'pr' ? `PR #${target.number}` : `branch ${target.headRef} vs ${target.baseRef}`

@@ -864,6 +864,23 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
  * "here is a file path".
  */
 export async function runViewer({ review, reviewPath, repoRoot = process.cwd() }) {
+  // Ink needs raw mode on a real terminal. Without this guard, piping the
+  // output or running under CI ends in a wall of React reconciler stack trace
+  // that says nothing about what actually went wrong. The analysis is the
+  // expensive part and it is already written, so this is a note, not a failure.
+  if (!process.stdout.isTTY || !process.stdin.isTTY) {
+    console.error(
+      [
+        '',
+        '  not a terminal, so there is nothing to draw on.',
+        `  the review is saved at ${reviewPath}`,
+        `  open it any time with:  slice --open ${reviewPath}`,
+        '',
+      ].join('\n'),
+    )
+    return
+  }
+
   const ui = viewerConfig({ review, cwd: repoRoot })
   ui.syntax = await resolveSyntaxTheme(ui.theme.syntax)
   setMarkdownTheme(ui.theme.markdown)

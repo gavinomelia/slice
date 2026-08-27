@@ -7,9 +7,15 @@ behavioral slice** rather than by path.
 
 ```
 slice 1679        # review PR #1679
+slice my-branch   # that branch's PR, or diff the branch if it has none
 slice             # the PR for the current branch, or the branch diff
 slice --branch    # local branch vs its base, before a PR exists
 ```
+
+The positional argument is a PR number or a branch name — `gh` resolves either,
+so `slice ccc-642-implement-posts-on-portal` finds that branch's PR and falls
+back to diffing the branch when there isn't one. A branch you have fetched but
+never checked out works too.
 
 <!-- demo: record an asciinema cast or GIF of a real sliced review and embed it here -->
 
