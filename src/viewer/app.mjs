@@ -11,7 +11,7 @@
 import { createElement as h, useEffect, useMemo, useRef, useState } from 'react'
 import { Box, Text, render, useApp, useInput, useStdout } from 'ink'
 
-import { buildRows, codeHighlighter, resolveSyntaxTheme } from './render.mjs'
+import { buildRows, codeHighlighter, resolveSyntaxTheme, splitRows } from './render.mjs'
 import {
   indentLines,
   markdownLines,
@@ -50,6 +50,31 @@ function buildTree(review) {
 }
 
 const findingsFor = (review, path) => review.findings.filter((f) => f.path === path)
+
+/**
+ * The diff row the cursor is actually on.
+ *
+ * Unified rows are their own answer. A split row is a pair, and only one of its
+ * two columns can be commented on at a time — so the side the user asked for
+ * wins, falling back to whichever column exists. Half-empty pairs are the norm
+ * (an insert has no left, a delete has no right), and a cursor pointing at
+ * nothing would make `c` fail on rows that look perfectly commentable.
+ */
+const cellAt = (row, side) => {
+  if (!row) return null
+  if (row.kind !== 'pair') return row.kind === 'hunk' ? null : row
+  return (side === 'left' ? row.left : row.right) ?? row.left ?? row.right ?? null
+}
+
+/** Which column the cursor mark is drawn in, after that same fallback. */
+const sideAt = (row, side) => {
+  if (row?.kind !== 'pair') return side
+  return (side === 'left' ? row.left : row.right) ? side : side === 'left' ? 'right' : 'left'
+}
+
+/** Does this display row carry `line` in either column? Used to chase a finding's anchor. */
+const rowHasLine = (row, line) =>
+  row.kind === 'pair' ? row.left?.line === line || row.right?.line === line : row.kind !== 'hunk' && row.line === line
 
 const draftKey = (path, side, line) => `${path}:${side}:${line ?? 'file'}`
 
@@ -325,6 +350,11 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
   const [focus, setFocus] = useState('tree')
   const [findScroll, setFindScroll] = useState(0)
   const [zoomed, setZoomed] = useState(false)
+  const [split, setSplit] = useState(layout.diffView === 'split')
+  // Which column of a split row `c` and the cursor mark mean. Additions by
+  // default: the right-hand side is the code that will exist after the merge,
+  // and that is what a review comment is usually about.
+  const [side, setSide] = useState('right')
 
   /**
    * A status message sits where the shortcut line goes, so it has to give it
@@ -340,6 +370,24 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
     const timer = setTimeout(() => setStatus(null), status.ms ?? 2500)
     return () => clearTimeout(timer)
   }, [status])
+
+  /**
+   * Put the viewer back on screen after $EDITOR has had it.
+   *
+   * `clear()` erases and writes nothing back — it only tells Ink to forget the
+   * frame it thinks is up. Something has to commit before anything is drawn
+   * again, and every caller here happens to set state on the way out, so in
+   * practice it repaints. Not worth depending on: the contract is that the
+   * screen comes back, not that the caller remembered to change something.
+   *
+   * A resize is the one event Ink answers with a repaint whether or not React
+   * has anything new to say, and the viewer's own handler reads the same
+   * dimensions back and changes nothing.
+   */
+  const redraw = () => {
+    ink.instance?.clear()
+    stdout.emit('resize')
+  }
 
   const current = tree[treeIndex]
   const path = current?.type === 'file' ? current.path : null
@@ -359,6 +407,12 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
   // against out-of-order resolution so fast j/k can't land stale rows.
   const pendingLine = useRef(null)
 
+  // Read through a ref rather than a dependency: which view is on screen has no
+  // bearing on how the diff is parsed, and listing it here would re-highlight
+  // the whole file every time `v` is pressed.
+  const splitRef = useRef(split)
+  splitRef.current = split
+
   useEffect(() => {
     if (!path) return setRows([])
     let live = true
@@ -371,9 +425,8 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
         setHOffset(0)
         // Landing here from n/p should put the cursor on the finding's line,
         // not the top of the file — otherwise you have to hunt for it.
-        const at = pendingLine.current
-          ? next.findIndex((r) => r.kind !== 'hunk' && r.line === pendingLine.current)
-          : -1
+        const shown = splitRef.current ? splitRows(next) : next
+        const at = pendingLine.current ? shown.findIndex((r) => rowHasLine(r, pendingLine.current)) : -1
         setCursor(at >= 0 ? at : 0)
         pendingLine.current = null
         setLoading(false)
@@ -426,6 +479,17 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
   // Border 2 + paddingX 2 + the scrollbar column.
   const inner = (width) => Math.max(8, width - 5)
 
+  // Paired lazily, and off the same row objects the unified view uses, so the
+  // two views cannot disagree and toggling costs no re-highlight.
+  const paired = useMemo(() => splitRows(rows), [rows])
+  const view = split ? paired : rows
+
+  // A gutter is the cursor mark, a five-column line number and its space, and
+  // the +/- sign: eight columns before any code. Split pays that twice, plus a
+  // column for the divider between the halves.
+  const halfWidth = Math.floor((inner(diffWidth) - 1) / 2)
+  const codeWidth = Math.max(8, (split ? halfWidth : inner(diffWidth)) - 8)
+
   const centre = useMemo(() => {
     if (current?.type === 'overview') return overviewCard(review, inner(diffWidth), ui)
     if (current?.type === 'slice') return sliceCard(review, slice, inner(diffWidth), ui)
@@ -446,34 +510,40 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
 
   /** Write or edit the draft on the cursor's line; an empty body deletes it. */
   const commentOnCursor = async () => {
-    const row = rows[cursor]
-    if (!path || !row || row.kind === 'hunk' || !row.line) {
+    const row = cellAt(view[cursor], side)
+    if (!path || !row || !row.line) {
       return setStatus({ tone: theme.risk.medium, text: 'Put the cursor on a diff line first (↑/↓).' })
     }
 
-    const side = row.kind === 'del' ? 'deletions' : 'additions'
-    const key = draftKey(path, side, row.line)
+    // Which file GitHub anchors the comment to, which is a property of the line
+    // itself and not of the column it happens to be drawn in. A context line
+    // exists in both files and belongs on the addition side either way.
+    const anchorSide = row.kind === 'del' ? 'deletions' : 'additions'
+    const key = draftKey(path, anchorSide, row.line)
     const existing = draftAt.get(key)
     const anchored = review.findings.find((f) => f.path === path && f.line === row.line)
 
     // A window of the diff around the target, marked so the line being
-    // commented on is unmistakable once the TUI is off screen.
-    const from = Math.max(0, cursor - 8)
+    // commented on is unmistakable once the TUI is off screen. Always unified,
+    // whichever view is on screen — two columns of code do not survive being
+    // squeezed into an editor's comment lines, and the point of carrying it in
+    // is to read the code, not to mirror the layout.
+    const at = rows.indexOf(row)
+    const from = Math.max(0, at - 8)
     const context = [
       `─── ${path} ───`,
-      ...rows.slice(from, cursor + 9).map((r, i) => {
-        const at = from + i
+      ...rows.slice(from, at + 9).map((r, i) => {
         if (r.kind === 'hunk') return `        ${r.text ?? '@@'}`
         const sign = r.kind === 'add' ? '+' : r.kind === 'del' ? '-' : ' '
-        return `${at === cursor ? '  >' : '   '} ${String(r.line ?? '').padStart(5)} ${sign} ${r.text ?? ''}`
+        return `${from + i === at ? '  >' : '   '} ${String(r.line ?? '').padStart(5)} ${sign} ${r.text ?? ''}`
       }),
     ]
 
     const body = await composeInEditor({
       seed: existing?.body ?? seedFromFinding(anchored),
-      hint: `# Comment on ${path}:${row.line}${side === 'deletions' ? ' (a removed line)' : ''}`,
+      hint: `# Comment on ${path}:${row.line}${anchorSide === 'deletions' ? ' (a removed line)' : ''}`,
       context,
-      redraw: () => ink.instance?.clear(),
+      redraw,
     })
 
     const without = drafts.filter((d) => draftKey(d.path, d.side, d.line) !== key)
@@ -481,7 +551,7 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
       persist(without)
       return setStatus(existing ? { tone: theme.ui.muted, text: 'Draft discarded.' } : null)
     }
-    persist([...without, { path, line: row.line, side, body }])
+    persist([...without, { path, line: row.line, side: anchorSide, body }])
     setStatus({ tone: theme.ui.draft, text: `Draft saved on ${path}:${row.line}.` })
   }
 
@@ -506,7 +576,7 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
       seed: '',
       hint: `# ${verb} ${repo}#${number}.`,
       context,
-      redraw: () => ink.instance?.clear(),
+      redraw,
     })
 
     // Still in flight, so it stays until the result replaces it.
@@ -576,17 +646,32 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
         const max = Math.max(0, centre.length - bodyHeight)
         return setScroll((s) => Math.max(0, Math.min(max, s + delta)))
       }
-      return setCursor((c) => Math.max(0, Math.min(rows.length - 1, c + delta)))
+      return setCursor((c) => Math.max(0, Math.min(view.length - 1, c + delta)))
     }
 
     const max = Math.max(0, foundLength.current - bodyHeight)
     setFindScroll((s) => Math.max(0, Math.min(max, s + delta)))
   }
 
+  /**
+   * Switch views without losing your place.
+   *
+   * A pair holds the very row objects the unified list holds, so the line under
+   * the cursor can be carried across by identity rather than by re-deriving an
+   * index — which would land somewhere else entirely, since a run of five
+   * changed lines is five unified rows but only three pairs.
+   */
+  const toggleSplit = () => {
+    const anchor = cellAt(view[cursor], side)
+    const next = split ? rows : paired
+    const at = anchor ? next.findIndex((r) => (r.kind === 'pair' ? r.left === anchor || r.right === anchor : r === anchor)) : -1
+    setSplit(!split)
+    setCursor(at >= 0 ? at : 0)
+  }
+
   // The widest line in the file, so sideways scrolling stops at the end of the
   // content instead of running off into empty space.
   const widest = useMemo(() => rows.reduce((max, row) => Math.max(max, row.text?.length ?? 0), 0), [rows])
-  const codeWidth = Math.max(8, inner(diffWidth) - 8)
   const scrollSide = (delta) =>
     setHOffset((x) => Math.max(0, Math.min(Math.max(0, widest - codeWidth + 2), x + delta * layout.hScrollStep)))
 
@@ -617,6 +702,12 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
     if (input === '1') return setZoomed(false), setFocus('tree')
     if (input === '2') return setFocus('diff')
     if (input === '3' && findingsVisible) return setZoomed(false), setFocus('findings')
+    if (input === 'v') return toggleSplit()
+    // Uppercase, because h/l are already the diff's sideways scroll and split
+    // view needs that more than unified does — half the width means twice the
+    // reaching for the end of a line.
+    if (input === 'H') return setSide('left')
+    if (input === 'L') return setSide('right')
     if (input === 'z') {
       const next = !zoomed
       setZoomed(next)
@@ -666,7 +757,7 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
   const treeTop = windowFor(treeIndex, tree.length, bodyHeight)
   const centreTop = centre
     ? Math.min(scroll, Math.max(0, centre.length - bodyHeight))
-    : windowFor(cursor, rows.length, bodyHeight)
+    : windowFor(cursor, view.length, bodyHeight)
 
   const foundTop = Math.max(0, Math.min(findScroll, Math.max(0, found.lines.length - bodyHeight)))
 
@@ -678,30 +769,42 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
         ? `SLICE ${current.sliceIndex + 1}/${review.slices.length}`
         : [
             path,
-            rows.length ? `L${rows[cursor]?.line ?? '–'}` : '',
-            rows.length ? `${centreTop + 1}-${Math.min(rows.length, centreTop + bodyHeight)}/${rows.length}` : '',
+            view.length ? `L${cellAt(view[cursor], side)?.line ?? '–'}` : '',
+            view.length ? `${centreTop + 1}-${Math.min(view.length, centreTop + bodyHeight)}/${view.length}` : '',
             hOffset > 0 ? `→${hOffset}` : '',
+            split ? 'split' : '',
             zoomed ? 'zoom' : '',
           ]
             .filter(Boolean)
             .join('  ')
 
-  /** One diff row: cursor mark, line number, gutter, then the visible window of code. */
-  const diffRow = (row, index) => {
+  /** The seam between hunks: a rule rather than a bare @@, so it spans the pane. */
+  const hunkRow = (row, index) => {
+    const label = ` ${row.text} `
+    return h(
+      Text,
+      { key: index, wrap: 'truncate', color: theme.diff.hunk, dimColor: true },
+      `  ${label}${'─'.repeat(Math.max(0, inner(diffWidth) - label.length - 3))}`,
+    )
+  }
+
+  /**
+   * One column of a diff: cursor mark, line number, sign, then the visible
+   * window of code.
+   *
+   * `line` is passed rather than read off the row because split view numbers
+   * its two columns differently — a context line has a number in the old file
+   * and another in the new one, and putting the new one on the left would
+   * misreport the pre-image.
+   *
+   * A missing row is a column's worth of blank. Half-empty pairs are ordinary
+   * — that is what an insert or a delete looks like side by side — and the
+   * emptiness is the information.
+   */
+  const diffCell = (row, { line, selected, prefix }) => {
+    if (!row) return [h(Text, { key: `${prefix}gap` }, ' '.repeat(codeWidth + 8))]
+
     const drafted = row.line && draftAt.has(draftKey(path, row.kind === 'del' ? 'deletions' : 'additions', row.line))
-    const selected = index === cursor
-
-    if (row.kind === 'hunk') {
-      // A rule rather than a bare @@ — it is a seam in the file, and reads as
-      // one only if it spans the pane.
-      const label = ` ${row.text} `
-      return h(
-        Text,
-        { key: index, wrap: 'truncate', color: theme.diff.hunk, dimColor: true },
-        `  ${label}${'─'.repeat(Math.max(0, inner(diffWidth) - label.length - 3))}`,
-      )
-    }
-
     const lineBg = row.kind === 'add' ? theme.diff.addBg : row.kind === 'del' ? theme.diff.delBg : theme.diff.contextBg
     const wordBg = row.kind === 'add' ? theme.diff.addWordBg : theme.diff.delWordBg
     const mark = row.kind === 'add' ? theme.diff.addMark : row.kind === 'del' ? theme.diff.delMark : undefined
@@ -715,19 +818,52 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
       bg: lineBg,
     })
 
+    return [
+      h(
+        Text,
+        { key: `${prefix}mark`, color: drafted ? theme.ui.draft : theme.ui.cursor, bold: true },
+        drafted ? '▌' : selected ? '▸' : ' ',
+      ),
+      h(
+        Text,
+        { key: `${prefix}no`, color: theme.diff.lineNumber, backgroundColor: lineBg, inverse: selected, dimColor: !selected },
+        String(line ?? '').padStart(5) + ' ',
+      ),
+      h(
+        Text,
+        { key: `${prefix}sign`, color: mark, backgroundColor: lineBg },
+        row.kind === 'add' ? '+' : row.kind === 'del' ? '-' : ' ',
+      ),
+      ...code.map((segment, j) =>
+        h(Text, { key: `${prefix}${j}`, color: segment.color, backgroundColor: segment.bg }, segment.text),
+      ),
+    ]
+  }
+
+  const diffRow = (row, index) =>
+    row.kind === 'hunk'
+      ? hunkRow(row, index)
+      : h(
+          Text,
+          { key: index, wrap: 'truncate' },
+          ...diffCell(row, { line: row.line, selected: index === cursor, prefix: 'u' }),
+        )
+
+  /** A pair drawn as two columns, old on the left and new on the right. */
+  const splitRow = (row, index) => {
+    if (row.kind === 'hunk') return hunkRow(row, index)
+
+    const selected = index === cursor ? sideAt(row, side) : null
+    // A context row is one row in both columns, so its left-hand number is the
+    // one the deletion side recorded — the only place the old numbering exists.
+    const leftLine = row.left?.kind === 'ctx' ? row.left.lineBefore : row.left?.line
+
     return h(
       Text,
       { key: index, wrap: 'truncate' },
-      h(Text, { color: drafted ? theme.ui.draft : theme.ui.cursor, bold: true }, drafted ? '▌' : selected ? '▸' : ' '),
-      h(
-        Text,
-        { color: theme.diff.lineNumber, backgroundColor: lineBg, inverse: selected, dimColor: !selected },
-        String(row.line ?? '').padStart(5) + ' ',
-      ),
-      h(Text, { color: mark, backgroundColor: lineBg }, row.kind === 'add' ? '+' : row.kind === 'del' ? '-' : ' '),
-      ...code.map((segment, j) =>
-        h(Text, { key: j, color: segment.color, backgroundColor: segment.bg }, segment.text),
-      ),
+      ...diffCell(row.left, { line: leftLine, selected: selected === 'left', prefix: 'l' }),
+      h(Text, { color: theme.ui.border, dimColor: true }, '│'),
+      ...diffCell(row.right, { line: row.right?.line, selected: selected === 'right', prefix: 'r' }),
     )
   }
 
@@ -737,9 +873,15 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
     return [...tally.entries()]
   }, [review])
 
+  // The diff line names the view `v` will switch *to*, not the one you are in —
+  // which one you are looking at is already obvious, and what the key does is
+  // not. Split spends its spare room teaching H/L, since two columns are the
+  // only place a side to choose exists.
   const KEYS = {
     tree: '[j/k] move  [[/]] slice  [tab] pane  [n/p] finding  [q] quit',
-    diff: '[j/k] line  [h/l] scroll  [0] reset  [z] zoom  [c] comment  [s/A/R] submit',
+    diff: split
+      ? '[j/k] line  [H/L] side  [h/l] scroll  [v] unified  [c] comment  [s/A/R] submit'
+      : '[j/k] line  [h/l] scroll  [0] reset  [v] split  [z] zoom  [c] comment  [s/A/R] submit',
     findings: '[j/k] scroll  [n/p] finding  [c] comment  [tab] pane  [q] quit',
   }
 
@@ -848,7 +990,7 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
           focused: focus === 'diff',
           width: diffWidth,
           theme,
-          total: centre ? centre.length : rows.length,
+          total: centre ? centre.length : view.length,
           top: centreTop,
           height: bodyHeight,
         },
@@ -856,7 +998,9 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
           ? h(Lines, { lines: centre, top: centreTop, height: bodyHeight })
           : loading
             ? h(Text, { color: theme.ui.muted }, 'highlighting…')
-            : rows.slice(centreTop, centreTop + bodyHeight).map((row, i) => diffRow(row, centreTop + i)),
+            : view
+                .slice(centreTop, centreTop + bodyHeight)
+                .map((row, i) => (split ? splitRow(row, centreTop + i) : diffRow(row, centreTop + i))),
       ),
 
       !findingsVisible

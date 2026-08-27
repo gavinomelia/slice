@@ -37,14 +37,38 @@ const stripComments = (text) =>
     .trim()
 
 /**
+ * Silence the parent's stdout for the duration of a callback.
+ *
+ * Ink does not stop rendering just because another program has the screen, and
+ * the viewer is exactly as tall as the terminal — which puts Ink on its
+ * clear-the-screen-and-repaint path, so any render at all while $EDITOR is up
+ * blanks the editor and draws the viewer over it. The status-line timer alone
+ * guarantees this: press `c` within a couple of seconds of any status message
+ * and it expires while you are still typing.
+ *
+ * The editor inherits fd 1 directly, so muting the parent's stream stops Ink
+ * without touching the editor.
+ */
+async function muted(run) {
+  const write = process.stdout.write
+  process.stdout.write = () => true
+  try {
+    return await run()
+  } finally {
+    process.stdout.write = write
+  }
+}
+
+/**
  * Open $EDITOR on some seeded text and return what came back, comments
  * stripped. Returns '' if the editor was left empty — callers treat that as
  * "delete this draft", the way git treats an empty commit message as abort.
  *
- * Ink owns the terminal, so it has to be handed back: leave the alternate
- * screen, drop raw mode, run the editor on the real tty, then restore and tell
- * Ink to repaint from scratch — its diffing cache is stale after another
- * program has drawn over the screen.
+ * Ink owns the terminal, so it has to be handed back whole: leave the alternate
+ * screen, show the cursor Ink hid, drop raw mode, stop drawing, and only then
+ * run the editor on the real tty. Ink hides the cursor exactly once and shows
+ * it again only on unmount, so without the explicit restore an editor that does
+ * not assert cursor visibility itself leaves you typing blind.
  */
 export async function composeInEditor({ seed, hint, context = [], redraw }) {
   const dir = mkdtempSync(join(tmpdir(), 'slice-'))
@@ -69,20 +93,26 @@ export async function composeInEditor({ seed, hint, context = [], redraw }) {
   const [bin, ...args] = command.split(/\s+/)
 
   const wasRaw = process.stdin.isRaw
-  process.stdout.write('\x1b[?1049l')
+  process.stdout.write('\x1b[?1049l\x1b[?25h')
   if (wasRaw) process.stdin.setRawMode(false)
   process.stdin.pause()
 
   try {
-    await new Promise((resolve, reject) => {
-      const child = spawn(bin, [...args, file], { stdio: 'inherit' })
-      child.on('error', reject)
-      child.on('close', resolve)
-    })
+    await muted(
+      () =>
+        new Promise((resolve, reject) => {
+          const child = spawn(bin, [...args, file], { stdio: 'inherit' })
+          child.on('error', reject)
+          child.on('close', resolve)
+        }),
+    )
   } finally {
     process.stdin.resume()
     if (wasRaw) process.stdin.setRawMode(true)
-    process.stdout.write('\x1b[?1049h')
+    // Back to our own screen with the cursor hidden again. Ink will not do it:
+    // it hides once and latches, so having shown the cursor for the editor we
+    // now own putting it back.
+    process.stdout.write('\x1b[?1049h\x1b[?25l')
     redraw?.()
   }
 

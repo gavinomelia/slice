@@ -55,6 +55,27 @@ test('no analysis runs unless --ai is passed', () => {
   assert.match(stdout, /no AI analysis/)
 })
 
+test('--prompt with no text is rejected rather than appending nothing', () => {
+  const { status, stderr } = slice('--branch', '--prompt')
+  assert.equal(status, 1)
+  assert.match(stderr, /--prompt needs some text/)
+})
+
+test('-p lands in review.instructions, and adds to what the config already said', () => {
+  // --print-config resolves and exits, so this checks the wiring without
+  // reaching the model. The config lives outside the repo so it never shows
+  // up in a later test's diff.
+  const configPath = join(mkdtempSync(join(tmpdir(), 'slice-prompt-')), 'config.jsonc')
+  writeFileSync(configPath, '{ "review": { "instructions": "Ignore vendor." } }')
+
+  const { status, stdout } = slice('--config', configPath, '--print-config', '-p', 'Group by file type.', '-p', 'Security.')
+  assert.equal(status, 0)
+
+  const { review } = JSON.parse(stdout.slice(stdout.indexOf('{')))
+  assert.match(review.instructions, /Ignore vendor\./, 'the config rule survives a one-off prompt')
+  assert.match(review.instructions, /Group by file type\.\nSecurity\./, 'repeating -p adds rather than replaces')
+})
+
 test('an unknown option is rejected as an option, not read as a branch', () => {
   const { status, stderr } = slice('--bogus')
   assert.equal(status, 1)

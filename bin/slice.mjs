@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { execFileSync, spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
-import { configTargets, loadConfig } from '../src/config/index.mjs'
+import { configTargets, loadConfig, mergePatch } from '../src/config/index.mjs'
 import { configTemplate } from '../src/config/template.mjs'
 
 import { splitPatch } from '../src/pipeline/patch.mjs'
@@ -32,6 +33,8 @@ Usage:
 
 Options:
   -a, --ai          run the AI analysis (slicing, summaries, findings)
+  -p, --prompt <t>  add instructions to the review prompt (implies --ai);
+                    repeatable — slice -p "review for security in particular"
   --branch          diff the local branch against its base instead of a PR
   --base <ref>      base ref for --branch mode (default: the repo default branch)
   --refresh         re-run the analysis even if a cached one exists (implies --ai)
@@ -89,6 +92,7 @@ function parseArgs(argv) {
     base: null,
     refresh: false,
     analyze: false,
+    prompt: null,
     open: null,
     timeout: 600,
     config: null,
@@ -113,7 +117,17 @@ function parseArgs(argv) {
     } else if (arg === '--branch') options.branch = true
     else if (arg === '--refresh') options.refresh = true
     else if (arg === '-a' || arg === '--ai') options.analyze = true
-    else if (arg === '--base') options.base = argv[++i]
+    else if (arg === '-p' || arg === '--prompt') {
+      const text = argv[++i]
+      // A bare -p is a plausible slip, and the silent version of it — an empty
+      // instruction appended to the prompt — is indistinguishable from the
+      // flag not working.
+      if (!text?.trim()) fail('--prompt needs some text, e.g. slice -p "review for security in particular"')
+      // Repeating the flag adds to the instructions rather than replacing
+      // them, so a shell alias can carry a standing rule and the call still
+      // gets to say something of its own.
+      options.prompt = options.prompt ? `${options.prompt}\n${text.trim()}` : text.trim()
+    } else if (arg === '--base') options.base = argv[++i]
     else if (arg === '--timeout') options.timeout = Number(argv[++i]) || 600
     else if (arg.startsWith('-')) fail(`unknown option "${arg}"\n${USAGE}`)
     else if (options.ref !== null) fail(`only one PR number or branch at a time (got "${options.ref}" and "${arg}")`)
@@ -122,19 +136,13 @@ function parseArgs(argv) {
     // matters once we know whether a PR came back.
     else options.ref = arg
   }
-  // Asking to redo the analysis implies wanting it in the first place —
-  // otherwise --refresh with no --ai would silently do nothing.
-  if (options.refresh) options.analyze = true
+  // Asking to redo the analysis, or to say something to it, implies wanting it
+  // in the first place — otherwise either flag with no --ai silently does
+  // nothing.
+  if (options.refresh || options.prompt) options.analyze = true
   return options
 }
 
-/**
- * Why there was no PR, in the user's terms.
- *
- * `gh pr view` failing is indistinguishable from "this branch has no PR", so
- * without this a missing or unauthenticated gh silently drops you into
- * branch-diff mode and the tool just looks broken.
- */
 function ghDiagnosis(repoRoot) {
   if (!tryRun('gh', ['--version'])) return 'the GitHub CLI is not installed — see https://cli.github.com'
   if (!tryRun('gh', ['auth', 'status'], { cwd: repoRoot })) return 'gh is not authenticated — run `gh auth login`'
@@ -150,15 +158,6 @@ function defaultBranch(repoRoot) {
   return 'main'
 }
 
-/**
- * `ref` may be a PR number, a branch name, or a URL — gh resolves all three.
- *
- * `ref` naming a URL can point at a repo other than the one `repoRoot` is a
- * checkout of — reviewing a PR you have not cloned is an ordinary thing to
- * want. So the repo this PR actually lives in is read from `pr.url`, which
- * `gh` fills in from wherever it resolved `ref` to, rather than from `gh repo
- * view` on `repoRoot`, which names the wrong repo whenever those two differ.
- */
 function resolvePrTarget(repoRoot, ref) {
   const fields = 'number,title,author,url,baseRefName,headRefName,headRefOid'
   const args = ['pr', 'view', ...(ref ? [String(ref)] : []), '--json', fields]
@@ -185,17 +184,6 @@ function resolvePrTarget(repoRoot, ref) {
   }
 }
 
-/**
- * Diff a branch against its base.
- *
- * `ref` names the branch; without one it is whatever is checked out. Returns
- * null when the named branch does not exist, so the caller can say so rather
- * than diffing HEAD and pretending it was asked for.
- *
- * A branch that exists only on the remote still counts — asking to review a
- * colleague's branch you have fetched but not checked out is an ordinary
- * thing to want.
- */
 function resolveBranchTarget(repoRoot, base, ref = null) {
   const headRev = ref
     ? ['refs/heads/' + ref, 'refs/remotes/origin/' + ref].find((candidate) =>
@@ -223,9 +211,6 @@ function resolveBranchTarget(repoRoot, base, ref = null) {
 
 function capturePatch(repoRoot, target) {
   if (target.kind === 'pr') {
-    // Without --repo, gh infers the repo from repoRoot's own remote — wrong
-    // whenever the PR lives somewhere else, which a URL or cross-repo number
-    // both allow. target.repo, resolved from the PR itself, is what to trust.
     const args = ['pr', 'diff', String(target.number), ...(target.repo ? ['--repo', target.repo] : [])]
     const patch = tryRun('gh', args, { cwd: repoRoot })
     if (patch === null) fail(`could not read the diff for PR #${target.number}`)
@@ -237,17 +222,6 @@ function capturePatch(repoRoot, target) {
   return run('git', ['diff', `${target.baseRef}...${target.headRev ?? 'HEAD'}`], { cwd: repoRoot })
 }
 
-/**
- * The order files were first touched in the commit history, oldest first.
- *
- * Without an AI analysis to group files by behavior, this is the next best
- * ordering: it tends to put the model or migration before the controller
- * before the view, because that is usually the order a change was built in.
- *
- * Returns null rather than throwing when the range is not available locally
- * — a PR whose commits were never fetched, most commonly — so the caller can
- * fall back to the diff's own order.
- */
 function commitOrder(repoRoot, target) {
   const head = target.kind === 'pr' ? target.headSha : (target.headRev ?? 'HEAD')
   const log = tryRun(
@@ -268,11 +242,6 @@ function commitOrder(repoRoot, target) {
   return order
 }
 
-/**
- * Sort changed files by `commitOrder`. A file that order does not mention —
- * git attributing a rename to its old name, most commonly — keeps its place
- * at the end, in the order the diff already had it.
- */
 function orderByCommit(files, order) {
   if (!order) return files
   const rank = new Map(order.map((path, i) => [path, i]))
@@ -282,15 +251,6 @@ function orderByCommit(files, order) {
     .map(({ file }) => file)
 }
 
-/**
- * Pull the analysis object out of claude's final message, tolerating a code
- * fence or stray prose around it.
- *
- * Scans for brace-balanced spans rather than matching a fence, because the
- * `fix` field is asked for as markdown and routinely contains its own fenced
- * code block. A fence-first regex stops at that inner fence and truncates the
- * reply mid-object.
- */
 function extractJson(text) {
   const objects = []
 
@@ -323,7 +283,6 @@ function extractJson(text) {
   return objects.find((object) => object?.slices) ?? objects[0] ?? null
 }
 
-/** The usage-limit notice claude prints when there is no budget left to run. */
 function limitNotice(...texts) {
   for (const text of texts) {
     const match = text?.match(/[^\n]*\b(?:hit your|usage|rate|session|weekly|quota)\b[^\n]*\blimit\b[^\n]*/i)
@@ -332,25 +291,7 @@ function limitNotice(...texts) {
   return null
 }
 
-/**
- * Run the analysis and return the parsed object, or null.
- *
- * The result comes back over stdout rather than through a file the model
- * writes: a Write outside the session's cwd needs a permission answer, and in
- * a non-interactive run there is nobody to answer it, so the process hangs
- * forever. Read-only tools plus stdout avoids the prompt entirely. The timeout
- * is a backstop so an unexpected prompt still can't wedge the CLI.
- */
-/**
- * Convention sources the review should be judged against.
- *
- * `.github/instructions/*.md` is the Copilot convention and, unlike AGENTS.md
- * or CLAUDE.md, claude does not load it on its own — so it has to be named in
- * the prompt or it is silently ignored.
- */
 function conventionSources(repoRoot, configured) {
-  // An explicit list is taken at its word, minus anything that isn't there —
-  // naming a file that does not exist would tell the model to read nothing.
   if (Array.isArray(configured)) {
     const missing = configured.filter((path) => !existsSync(join(repoRoot, path)))
     for (const path of missing) console.error(`  config names a convention file that does not exist: ${path}`)
@@ -376,35 +317,14 @@ function conventionSources(repoRoot, configured) {
 function runAnalysis({ repoRoot, target, patchPath, filesPath, rawPath, timeoutMs, conventionFiles, config }) {
   const prompt = analysisPrompt({ patchPath, filesPath, target, repoRoot, conventionFiles, config })
 
-  // claude -p emits nothing until it finishes, so without a ticker a run that
-  // legitimately takes minutes is indistinguishable from a hang.
   const startedAt = Date.now()
   const ticker = setInterval(() => {
     process.stderr.write(`\r  analyzing — reading the repo… ${Math.round((Date.now() - startedAt) / 1000)}s`)
   }, 1000)
 
-  // Read, Grep, and Glob are the only tools the default config grants, and
-  // neither needs an MCP server — but claude still connects every MCP server
-  // configured at the user or project level before the first token, which on
-  // a machine with a dozen of them can be most of the run's wall-clock time.
-  // Skip that handshake unless a convention explicitly asked for an MCP tool.
   const allowedTools = config.review.allowedTools ?? []
   const usesMcp = allowedTools.some((tool) => tool.startsWith('mcp__'))
 
-  /**
-   * Restricting the tools takes two flags, and they do different jobs.
-   *
-   * `--tools` decides which tools exist; `--allowed-tools` decides which of
-   * the surviving ones run without stopping to ask. Passing only the second —
-   * which is what this did until someone timed it — leaves Bash, Write, and
-   * Task in the model's hands, and a review that *can* run the test suite
-   * does: measured on a seven-file diff, `npm test` was attempted four times,
-   * two of those retries after the sandbox refused, for about a hundred
-   * seconds that told the reviewer nothing.
-   *
-   * `--tools` names built-ins only. An MCP tool arrives with its server rather
-   * than from this list, so it stays out of here and in `--allowed-tools`.
-   */
   const builtinTools = allowedTools.filter((tool) => !tool.startsWith('mcp__'))
 
   const child = spawn(
@@ -421,8 +341,6 @@ function runAnalysis({ repoRoot, target, patchPath, filesPath, rawPath, timeoutM
       // one of them.
       '--tools',
       builtinTools.join(','),
-      // An empty list, by contrast, is a bare --allowed-tools that would
-      // swallow the next argument. Omit the flag instead.
       ...(allowedTools.length ? ['--allowed-tools', ...allowedTools] : []),
       ...(usesMcp ? [] : ['--strict-mcp-config']),
     ],
@@ -453,15 +371,10 @@ function runAnalysis({ repoRoot, target, patchPath, filesPath, rawPath, timeoutM
     child.on('error', (error) => finish(null, `claude failed to start: ${error.message}`))
 
     child.on('close', (code) => {
-      // --output-format json wraps the reply, but a run that dies early prints
-      // the bare reply or nothing at all. Try every shape before giving up: a
-      // usable reply is worth salvaging even from a nonzero exit, because
-      // re-running it costs another slice of the usage window.
       let envelope = null
       try {
         envelope = JSON.parse(stdout)
       } catch {
-        // Not the JSON envelope; the scan below still reads stdout directly.
       }
       const reply = typeof envelope?.result === 'string' ? envelope.result : stdout
 
@@ -470,9 +383,6 @@ function runAnalysis({ repoRoot, target, patchPath, filesPath, rawPath, timeoutM
 
       const limit = limitNotice(reply, stderr)
 
-      // Keep whatever came back so a parse bug or a partial reply can be
-      // recovered without paying for the run twice. A limit notice is not a
-      // reply, so it is not worth caching.
       let saved = false
       if (!limit && reply.includes('{')) {
         writeFileSync(rawPath, reply)
@@ -492,7 +402,6 @@ function runAnalysis({ repoRoot, target, patchPath, filesPath, rawPath, timeoutM
   })
 }
 
-/** `--init-config`: write a starter file, never over an existing one. */
 function initConfig(scope, repoRoot) {
   const path = configTargets(repoRoot)[scope]
   if (existsSync(path)) fail(`${path} already exists — edit it, or delete it first`)
@@ -501,7 +410,6 @@ function initConfig(scope, repoRoot) {
   console.log(`\n  wrote ${path}\n\n  Everything in it is commented out; uncomment what you want to change.\n`)
 }
 
-/** `--print-config`: the resolved result, and which files produced it. */
 function printConfig({ config, sources }) {
   console.log(`\n  ${sources.length ? sources.join('\n  ') : 'no config files found — these are the built-in defaults'}\n`)
   console.log(JSON.stringify(config, null, 2))
@@ -521,13 +429,17 @@ async function main() {
   } catch (error) {
     fail(error.message)
   }
-  const { config, sources, warnings: configWarnings } = loaded
+  const { sources, warnings: configWarnings } = loaded
   for (const warning of configWarnings) console.error(`  ${warning}`)
+
+  const config = options.prompt
+    ? mergePatch(loaded.config, {
+        review: { instructions: [loaded.config.review.instructions, options.prompt].filter(Boolean).join('\n\n') },
+      })
+    : loaded.config
 
   if (options.printConfig) return printConfig({ config, sources })
 
-  // --open is the cached-review path: no git, no gh, no model. It exists
-  // because re-opening a review you already paid for should not cost anything.
   if (options.open) {
     if (!existsSync(options.open)) fail(`no such review file: ${options.open}`)
     return runViewer({
@@ -537,9 +449,6 @@ async function main() {
     })
   }
 
-  // A bare argument is a PR number or a branch, and gh takes either — so try
-  // for a PR first and fall back to diffing the branch. `--branch` skips the
-  // PR lookup entirely.
   const asBranch = () => resolveBranchTarget(repoRoot, options.base, options.branch ? options.ref : null)
   const target = options.branch ? asBranch() : (resolvePrTarget(repoRoot, options.ref) ?? resolveBranchTarget(repoRoot, options.base, options.ref))
 
@@ -572,11 +481,13 @@ async function main() {
   const cacheDir = join(homedir(), '.cache', 'slice', slug)
   mkdirSync(cacheDir, { recursive: true })
 
+  const tag = options.prompt ? `-${createHash('sha256').update(options.prompt).digest('hex').slice(0, 8)}` : ''
+
   const patchPath = join(cacheDir, `${id}.patch`)
   const filesPath = join(cacheDir, `${id}.files.json`)
-  const analysisPath = join(cacheDir, `${id}.analysis.json`)
-  const rawPath = join(cacheDir, `${id}.analysis.raw.txt`)
-  const reviewPath = join(cacheDir, `${id}.review.json`)
+  const analysisPath = join(cacheDir, `${id}${tag}.analysis.json`)
+  const rawPath = join(cacheDir, `${id}${tag}.analysis.raw.txt`)
+  const reviewPath = join(cacheDir, `${id}${tag}.review.json`)
 
   writeFileSync(patchPath, patch)
   writeFileSync(
@@ -605,8 +516,6 @@ async function main() {
       console.error(`  could not parse the cached analysis: ${error.message}`)
     }
   } else {
-    // A previous run's reply that failed to parse is retried first: it already
-    // cost a slice of the usage window, so spend the parse before the tokens.
     if (existsSync(rawPath) && !options.refresh) {
       analysis = extractJson(readFileSync(rawPath, 'utf8'))
       if (analysis?.slices) console.log('  recovered the previous run’s reply from cache')
@@ -614,9 +523,6 @@ async function main() {
     }
 
     if (!analysis) {
-      // Checked up front rather than left to the spawn's error event: by then
-      // the patch is already written and the ticker is already running, so the
-      // failure reads as "the analysis broke" instead of "install this".
       if (!tryRun('claude', ['--version'])) {
         fail('Claude Code is not installed — see https://claude.com/claude-code, or pass --no-analyze')
       }
@@ -626,6 +532,10 @@ async function main() {
         console.log(`  judging against ${conventionFiles.join(', ')}`)
       }
       if (sources.length > 0) console.log(`  configured by ${sources.join(', ')}`)
+      if (options.prompt) {
+        const line = options.prompt.replace(/\s+/g, ' ')
+        console.log(`  also asked: ${line.length > 68 ? `${line.slice(0, 67)}…` : line}`)
+      }
 
       analysis = await runAnalysis({
         repoRoot,

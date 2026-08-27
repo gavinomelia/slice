@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
-import { test } from 'node:test'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { after, test } from 'node:test'
 
 import { analysisPrompt } from '../src/pipeline/prompt.mjs'
 import { DEFAULT_CONFIG } from '../src/config/defaults.mjs'
@@ -47,6 +50,22 @@ test('the taxonomy drives both the instructions and the output schema', () => {
 test('instructions land at the very end', () => {
   const prompt = build(mergePatch(DEFAULT_CONFIG, { review: { instructions: 'Ignore vendor/.' } }))
   assert.ok(prompt.trimEnd().endsWith('Ignore vendor/.'))
+})
+
+test('a prompt file honours instructions too, wherever it puts them', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'slice-prompt-'))
+  after(() => rmSync(dir, { recursive: true, force: true }))
+
+  const withPlaceholder = join(dir, 'placed.md')
+  const withoutPlaceholder = join(dir, 'plain.md')
+  writeFileSync(withPlaceholder, 'Read {{patchPath}}.\n\nRULES: {{instructions}}\n\nTAIL.\n')
+  writeFileSync(withoutPlaceholder, 'Read {{patchPath}}.\n')
+
+  const promptWith = (promptFile) =>
+    build(mergePatch(DEFAULT_CONFIG, { review: { promptFile, instructions: 'Only security.' } }))
+
+  assert.match(promptWith(withPlaceholder), /RULES: Only security\.\n\nTAIL\./, 'the template places them')
+  assert.ok(promptWith(withoutPlaceholder).trimEnd().endsWith('Only security.'), 'otherwise they go last')
 })
 
 test('the output schema is always present, whatever is overridden', () => {

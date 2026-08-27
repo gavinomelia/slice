@@ -172,12 +172,16 @@ export async function buildRows(file, { theme = DEFAULT_THEMES.dark, tabWidth = 
   })
 
   const rows = []
-  const push = (kind, node) => {
+  const push = (kind, node, before) => {
     if (!node) return
     const segments = lineToSegments(node, tabWidth)
     rows.push({
       kind,
       line: node.properties?.['data-line'] ?? null,
+      // The same context line's number in the old file. Only split view has
+      // somewhere to put it, but it has to be captured here — by the time the
+      // pairing happens the deletion-side nodes are gone.
+      lineBefore: before?.properties?.['data-line'] ?? null,
       segments,
       // Plain text alongside, for seeding $EDITOR with diff context and for
       // measuring the widest line without re-walking segments.
@@ -194,7 +198,9 @@ export async function buildRows(file, { theme = DEFAULT_THEMES.dark, tabWidth = 
     rows.push({ kind: 'hunk', line: null, segments: [{ text }], text })
     for (const entry of hunk.hunkContent) {
       if (entry.type === 'context') {
-        for (let i = 0; i < entry.lines; i++) push('ctx', code.additionLines[entry.additionLineIndex + i])
+        for (let i = 0; i < entry.lines; i++) {
+          push('ctx', code.additionLines[entry.additionLineIndex + i], code.deletionLines[entry.deletionLineIndex + i])
+        }
       } else {
         for (let i = 0; i < entry.deletions; i++) push('del', code.deletionLines[entry.deletionLineIndex + i])
         for (let i = 0; i < entry.additions; i++) push('add', code.additionLines[entry.additionLineIndex + i])
@@ -203,4 +209,52 @@ export async function buildRows(file, { theme = DEFAULT_THEMES.dark, tabWidth = 
   }
 
   return rows
+}
+
+/**
+ * Unified rows -> side-by-side pairs.
+ *
+ * Derived from the unified rows rather than built alongside them, so the two
+ * views can never disagree about what the diff says and toggling costs no
+ * re-parse. A pair holds the same row objects the unified view holds, which is
+ * what lets the cursor be carried across a toggle by identity.
+ *
+ * A run of deletions is zipped against the additions that follow it, index by
+ * index. That is the only pairing a unified diff supports — the hunk records
+ * that three lines became two, not which became which — and it is the same
+ * guess every side-by-side viewer makes. The leftover rows on the longer side
+ * get a half-empty pair, so nothing is dropped and nothing is invented.
+ *
+ * A context line is one row appearing in both columns, under two different
+ * numbers. Hunk headers stay whole: they are a seam in the file, not a line of
+ * it, and splitting one in half would say otherwise.
+ */
+export function splitRows(rows) {
+  const out = []
+  let deletions = []
+  let additions = []
+
+  const flush = () => {
+    for (let i = 0; i < Math.max(deletions.length, additions.length); i++) {
+      out.push({ kind: 'pair', left: deletions[i] ?? null, right: additions[i] ?? null })
+    }
+    deletions = []
+    additions = []
+  }
+
+  for (const row of rows) {
+    if (row.kind === 'del') {
+      deletions.push(row)
+      continue
+    }
+    if (row.kind === 'add') {
+      additions.push(row)
+      continue
+    }
+    flush()
+    out.push(row.kind === 'hunk' ? row : { kind: 'pair', left: row, right: row })
+  }
+  flush()
+
+  return out
 }

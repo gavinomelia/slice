@@ -11,6 +11,7 @@ slice my-branch   # that branch's PR, or diff the branch if it has none
 slice             # the PR for the current branch, or the branch diff
 slice --branch    # local branch vs its base, before a PR exists
 slice 1679 --ai   # the same, with the AI-analyzed review — slices, summaries, findings
+slice -p "..."    # analyze, with something extra to say about how
 ```
 
 The positional argument is a PR number or a branch name — `gh` resolves either,
@@ -23,6 +24,31 @@ Pass `--ai` when you want the analyzed review. Without it, files aren't grouped
 into slices, but they are still ordered by when they were first committed
 rather than alphabetically — usually close to the order the change was built
 in, and a reasonable one to review in.
+
+## Saying something about this review
+
+`-p` adds to the review prompt for one run, and implies `--ai`:
+
+```
+slice -p "Group things by file type alphabetically, and review for security in particular"
+slice 1679 -p "The migration is the risky part — check it against the backfill job"
+slice -p "Ignore the CSS" -p "Be harsh about the API contract"
+```
+
+It lands in the same place as `review.instructions` in a config file: the
+catch-all at the end of the prompt, after the sections that decide slicing,
+summaries, and findings. It **adds to** whatever the repo's config already
+said rather than replacing it — a one-off note should not silently drop your
+team's standing rules. Repeating the flag adds another line, so a shell alias
+can carry a standing rule and the call still gets to say something of its own.
+
+A prompted run is cached separately from a plain one, so the two never
+overwrite each other's answer: repeating the same `-p` costs nothing, and
+dropping it gives you the unprompted review back rather than a stale one
+shaped by a flag you are no longer passing.
+
+If a rule turns out to be one you want every time, move it into `.slice.jsonc`
+— either `review.instructions`, or the specific section it belongs to.
 
 <!-- demo: record an asciinema cast or GIF of a real sliced review and embed it here -->
 
@@ -95,6 +121,8 @@ the diff's line cursor, or the findings pane's scroll.
 | `j` `k` `↑` `↓` | move within the focused panel |
 | `space` `b` | page within the focused panel |
 | `h` `l` `←` `→` | scroll the diff sideways · `0` back to the left |
+| `v` | switch the diff between unified and split |
+| `H` `L` | in split, which column `c` comments on |
 | `z` | zoom the diff to the full terminal |
 | `[` `]` | previous / next slice |
 | `n` `p` | next / previous finding, anywhere in the review |
@@ -105,6 +133,14 @@ the diff's line cursor, or the findings pane's scroll.
 Code is never wrapped — a wrapped diff line is a lie about the code — so long
 lines are truncated with a `›` at the edge and reached with `h` `l`. `z` hides
 the side panels and gives the diff the whole terminal.
+
+`v` switches between unified and split. Split pairs each run of deletions with
+the additions that follow it, old on the left under the old line numbers, new on
+the right — the same guess every side-by-side viewer makes, since a diff records
+that three lines became two and not which became which. It costs half the width
+per column, so `z` and `v` go together on anything but a wide terminal. `H` and
+`L` pick the column `c` comments on; a line that exists in only one of them
+takes the cursor regardless.
 
 Selecting a slice shows its card — the walkthrough, its files, and every finding
 it covers — instead of a diff. The last row of the tree is the draft review:
@@ -159,7 +195,7 @@ built-in instructions; `{ "replace": "..." }` swaps the section out.
   "review": {
     "slicing": "Treat anything under db/migrate as its own slice, always.",
     "findings": { "append": "A controller action with no Pundit policy check is a bug, not a risk." },
-    "instructions": "Ignore anything under vendor/.",
+    "instructions": "Ignore anything under vendor/.",   // `slice -p` adds to this
 
     "severities": { "nit": null },        // stop reporting nits entirely
     "allowedTools": ["Read", "Grep", "Glob", "mcp__linear__get_issue"],
@@ -183,7 +219,9 @@ today.
 `promptFile` replaces the prompt entirely, with `{{patchPath}}`,
 `{{outputSchema}}` and friends substituted in. The output schema itself is the
 one thing that cannot be changed: `merge.mjs` and the viewer are both built
-against its shape.
+against its shape. `{{instructions}}` places `review.instructions` and anything
+from `-p`; leave it out and they are appended at the end, so the flag still
+works against a replaced prompt.
 
 `allowedTools` is worth knowing about. It is read-only by default because the
 analysis runs non-interactively, so a tool that triggers a permission prompt
@@ -209,7 +247,10 @@ on reasoning rather than reading.
     "ui": { "accent": "magenta", "borderFocus": "magenta" },
     "diff": { "addBg": "#0b2c18", "delBg": "#3a1114" }
   },
-  "layout": { "treeWidth": 38, "findingsWidth": 58, "tabWidth": 4, "hScrollStep": 8 }
+  "layout": {
+    "diffView": "unified",   // or "split" — which one a diff opens in; v switches
+    "treeWidth": 38, "findingsWidth": 58, "tabWidth": 4, "hScrollStep": 8
+  }
 }
 ```
 
@@ -221,7 +262,9 @@ missing.
 
 Artifacts are cached in `~/.cache/slice/<repo>/`, outside the repo, so reviewing
 never dirties your working tree. Re-run with `--ai --refresh` to redo the
-analysis; plain `--ai` reuses the cached one if there is one.
+analysis; plain `--ai` reuses the cached one if there is one. A run with `-p`
+gets its own entry, keyed by a hash of the instructions, so it neither reads
+nor clobbers the plain review of the same diff.
 
 Re-open a cached review for free, without touching git, `gh`, or the model:
 

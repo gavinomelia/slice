@@ -1,24 +1,8 @@
-/**
- * The analysis prompt. Runs via `claude -p` with the repo as cwd, so the model
- * can read callers, conventions, and sibling implementations — context a bare
- * API call against the diff alone would not have.
- *
- * The prompt is assembled from named sections so a repo can bend any of them
- * without forking the whole thing. Two parts are deliberately not
- * configurable: the framing that tells the model where the patch is, and the
- * output schema. `merge.mjs` and both viewers are built against that schema,
- * so a repo that changed it would produce a review nothing could read.
- *
- * The taxonomies are the exception that proves the rule — severities and slice
- * kinds ARE configurable, and flow from config into the prompt, the schema,
- * and the viewer's glyphs together, so they can never drift apart.
- */
 import { readFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 
 import { DEFAULT_CONFIG, promptSection } from '../config/index.mjs'
 
-/** `- \`bug\` — wrong behavior now…`, one per configured severity. */
 const taxonomyList = (entries) =>
   Object.entries(entries ?? {})
     .map(([name, meta]) => `- \`${name}\` — ${meta?.description ?? ''}`.trimEnd())
@@ -98,7 +82,6 @@ Use \`line: null\` for file-wide or out-of-diff findings, and \`endLine: null\`
 for a single line.
 `
 
-/** The one section nothing may override — both viewers are built against it. */
 const outputSchema = ({ severities, sliceKinds }) => `## Output
 
 Your final message must be a single JSON object and nothing else — no prose
@@ -126,12 +109,8 @@ before or after it, no code fence. It must match this shape exactly:
 Include NO diff text, patch text, or file contents in the JSON. The viewer
 already has the diff and renders it alongside your analysis.`
 
-/**
- * Substitute `{{placeholder}}` values into a repo-supplied prompt file.
- *
- * An unrecognised placeholder is left as written rather than blanked, so a
- * typo shows up in the prompt instead of quietly removing an instruction.
- */
+const alsoSection = (instructions) => (instructions?.trim() ? `\n## Also\n\n${instructions.trim()}\n` : '')
+
 function fillTemplate(template, values) {
   return template.replace(/\{\{([\w.]+)\}\}/g, (whole, key) => values[key] ?? whole)
 }
@@ -151,13 +130,15 @@ export function analysisPrompt({
 
   if (review.promptFile) {
     const path = isAbsolute(review.promptFile) ? review.promptFile : join(repoRoot, review.promptFile)
-    return fillTemplate(readFileSync(path, 'utf8'), {
+    const template = readFileSync(path, 'utf8')
+    const filled = fillTemplate(template, {
       patchPath,
       filesPath,
       conventionFiles: conventionFiles.map((file) => `- \`${file}\``).join('\n'),
       severities: taxonomyList(severities),
       sliceKinds: taxonomyList(sliceKinds),
       outputSchema: schema,
+      instructions: review.instructions?.trim() ?? '',
       'target.title': target.title,
       'target.author': target.author,
       'target.repo': target.repo,
@@ -165,6 +146,11 @@ export function analysisPrompt({
       'target.baseRef': target.baseRef,
       'target.headRef': target.headRef,
     })
+    // A replaced prompt still has to honour the instructions — `-p` lands
+    // there, and a flag that silently does nothing is worse than no flag.
+    // Where they go is the template's call if it names `{{instructions}}`;
+    // otherwise they go last, as they do in the built-in prompt.
+    return template.includes('{{instructions}}') ? filled : filled + alsoSection(review.instructions)
   }
 
   const framing = `You are producing a structured code review of a pull request. Your output
@@ -222,7 +208,7 @@ sentence budgets below are limits, not targets — come in under them.
     promptSection(review.findings, findingsSection(severities)),
     promptSection(review.anchoring, ANCHORING),
     schema,
-    review.instructions?.trim() ? `\n## Also\n\n${review.instructions.trim()}` : '',
+    alsoSection(review.instructions),
   ]
 
   return sections.filter((section) => section.trim()).join('\n')
