@@ -26,6 +26,7 @@ const SEVERITY = {
 }
 
 const RISK = { low: 'green', medium: 'yellow', high: 'red' }
+const PANES = ['tree', 'diff', 'findings']
 
 /** Slices flattened into one selectable list. Headers are selectable too. */
 function buildTree(review) {
@@ -170,11 +171,29 @@ function findingLines(findings, active, width) {
   return { lines, starts }
 }
 
-function Pane({ title, width, children }) {
+/**
+ * The focused pane is drawn with a heavy cyan border and its number in the
+ * title. The mode is real, so it has to be visible — an invisible focus is
+ * what makes j do three unpredictable things.
+ */
+function Pane({ title, number, focused, width, children }) {
   return h(
     Box,
-    { flexDirection: 'column', width, flexShrink: 0, borderStyle: 'round', borderColor: 'gray', overflow: 'hidden', paddingX: 1 },
-    h(Text, { bold: true, color: 'gray', wrap: 'truncate' }, title),
+    {
+      flexDirection: 'column',
+      width,
+      flexShrink: 0,
+      borderStyle: focused ? 'bold' : 'round',
+      borderColor: focused ? 'cyan' : 'gray',
+      overflow: 'hidden',
+      paddingX: 1,
+    },
+    h(
+      Text,
+      { bold: true, wrap: 'truncate' },
+      h(Text, { color: focused ? 'cyan' : 'gray' }, `${number} `),
+      h(Text, { color: focused ? 'cyan' : 'gray', dimColor: !focused }, title),
+    ),
     children,
   )
 }
@@ -231,6 +250,8 @@ function App({ review, reviewPath, ink }) {
   const [loading, setLoading] = useState(false)
   const [drafts, setDrafts] = useState(() => loadDrafts(reviewPath))
   const [status, setStatus] = useState(null)
+  const [focus, setFocus] = useState('tree')
+  const [findScroll, setFindScroll] = useState(0)
 
   const current = tree[treeIndex]
   const path = current?.type === 'file' ? current.path : null
@@ -368,24 +389,50 @@ function App({ review, reviewPath, ink }) {
 
   const found = useMemo(() => findingLines(findings, active, findWidth - 4), [findings, active, findWidth])
 
+  // moveIn needs these at keypress time, after render has computed them.
+  const foundLength = useRef(0)
+  const foundStarts = useRef([])
+  foundLength.current = found.lines.length
+  foundStarts.current = found.starts
+
+  // Picking a different finding parks the pane at that finding's first line;
+  // j/k then scrolls freely from there.
+  useEffect(() => {
+    setFindScroll(foundStarts.current[active] ?? 0)
+  }, [active, findings])
+
   const selectFinding = (finding) => {
     const at = tree.findIndex((r) => r.type === 'file' && r.path === finding.path)
     pendingLine.current = finding.line ?? null
     if (at >= 0) setTreeIndex(at)
     const within = review.findings.filter((f) => f.path === finding.path).indexOf(finding)
     setFindingIndex(Math.max(0, within))
+    setFocus('findings')
   }
 
   const moveTree = (delta) => setTreeIndex((i) => Math.max(0, Math.min(tree.length - 1, i + delta)))
 
-  // On a card there is nothing to point at, so the body scrolls. On a diff the
-  // cursor moves and the window follows it — commenting needs a target line.
-  const scrollBody = (delta) => {
-    if (centre) {
-      const max = Math.max(0, centre.length - bodyHeight)
-      return setScroll((s) => Math.max(0, Math.min(max, s + delta)))
+  /**
+   * j/k and the arrows move within whatever pane has focus.
+   *
+   * In the diff that means a line cursor, because commenting needs a target.
+   * On a card and in the findings pane there is nothing to point at, so the
+   * body scrolls instead — which is what makes a finding longer than the pane
+   * readable at all.
+   */
+  const moveIn = (delta) => {
+    if (focus === 'tree') return moveTree(delta)
+
+    if (focus === 'diff') {
+      if (centre) {
+        const max = Math.max(0, centre.length - bodyHeight)
+        return setScroll((s) => Math.max(0, Math.min(max, s + delta)))
+      }
+      return setCursor((c) => Math.max(0, Math.min(rows.length - 1, c + delta)))
     }
-    setCursor((c) => Math.max(0, Math.min(rows.length - 1, c + delta)))
+
+    const max = Math.max(0, foundLength.current - bodyHeight)
+    setFindScroll((s) => Math.max(0, Math.min(max, s + delta)))
   }
 
   // Key repeat arrives coalesced — holding j delivers "jjjj" as one input, and
@@ -412,13 +459,15 @@ function App({ review, reviewPath, ink }) {
       return void submit(event).catch((e) => setStatus({ tone: 'red', text: e.message }))
     }
 
-    if (input === 'j') return moveTree(1)
-    if (input === 'k') return moveTree(-1)
+    if (input === '1') return setFocus('tree')
+    if (input === '2') return setFocus('diff')
+    if (input === '3') return setFocus('findings')
+    if (key.tab) return setFocus(PANES[(PANES.indexOf(focus) + (key.shift ? 2 : 1)) % 3])
 
-    if (key.downArrow) return scrollBody(1)
-    if (key.upArrow) return scrollBody(-1)
-    if (key.pageDown || input === ' ') return scrollBody(bodyHeight - 2)
-    if (key.pageUp || input === 'b') return scrollBody(-(bodyHeight - 2))
+    if (input === 'j' || key.downArrow) return moveIn(1)
+    if (input === 'k' || key.upArrow) return moveIn(-1)
+    if (key.pageDown || input === ' ') return moveIn(bodyHeight - 2)
+    if (key.pageUp || input === 'b') return moveIn(-(bodyHeight - 2))
 
     // [ and ] land on the slice *header*, not its first file — the point is to
     // read what the slice is before reading its diffs.
@@ -426,7 +475,7 @@ function App({ review, reviewPath, ink }) {
       const here = current?.sliceIndex ?? -1
       const target = Math.max(0, Math.min(review.slices.length - 1, here + (input === ']' ? 1 : -1)))
       const at = tree.findIndex((r) => r.type === 'slice' && r.sliceIndex === target)
-      if (at >= 0) setTreeIndex(at)
+      if (at >= 0) setTreeIndex(at), setFocus('tree')
       return
     }
 
@@ -444,9 +493,7 @@ function App({ review, reviewPath, ink }) {
     ? Math.min(scroll, Math.max(0, centre.length - bodyHeight))
     : windowFor(cursor, rows.length, bodyHeight)
 
-  // The active finding scrolls to the top of the pane so its whole expanded
-  // body is on screen, rather than being centred and clipped at the bottom.
-  const foundTop = Math.max(0, Math.min(found.starts[active] ?? 0, Math.max(0, found.lines.length - bodyHeight)))
+  const foundTop = Math.max(0, Math.min(findScroll, Math.max(0, found.lines.length - bodyHeight)))
 
   const centreTitle = current?.type === 'overview'
     ? 'OVERVIEW'
@@ -483,7 +530,7 @@ function App({ review, reviewPath, ink }) {
 
       h(
         Pane,
-        { title: 'SLICES', width: treeWidth },
+        { title: 'SLICES', number: 1, focused: focus === 'tree', width: treeWidth },
         ...tree.slice(treeTop, treeTop + bodyHeight).map((row, i) => {
           const index = treeTop + i
           const selected = index === treeIndex
@@ -516,7 +563,7 @@ function App({ review, reviewPath, ink }) {
 
       h(
         Pane,
-        { title: centreTitle, width: diffWidth },
+        { title: centreTitle, number: 2, focused: focus === 'diff', width: diffWidth },
         centre
           ? h(Lines, { lines: centre, top: centreTop, height: bodyHeight })
           : loading
@@ -540,6 +587,8 @@ function App({ review, reviewPath, ink }) {
         Pane,
         {
           title: `FINDINGS${findings.length ? ` ${Math.min(active + 1, findings.length)}/${findings.length}` : ''}`,
+          number: 3,
+          focused: focus === 'findings',
           width: findWidth,
         },
         findings.length === 0
@@ -556,7 +605,7 @@ function App({ review, reviewPath, ink }) {
         : h(
             Text,
             { color: 'gray', wrap: 'truncate' },
-            `[j/k] file  [[/]] slice  [n/p] finding  [↑↓] line  [c] comment  [s/A/R] submit  [q] quit`,
+            `[1/2/3|tab] panel  [j/k] move  [[/]] slice  [n/p] finding  [c] comment  [s/A/R] submit  [q] quit`,
           ),
     ),
   )

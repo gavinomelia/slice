@@ -69,23 +69,32 @@ else — the terminal viewer renders diffs as ANSI, the browser one as DOM.
 | syntax highlighting | ✓ | ✓ |
 | markdown in summaries and fixes | ✓ | ✓ |
 | split diff, appearance settings | | ✓ |
-| line comments, posting a review | | ✓ |
+| line comments, posting a review | ✓ | ✓ |
 
 ### Terminal keys
 
-Every key means one thing everywhere — there is no focused pane and no mode.
+`1` `2` `3` jump straight to a panel and `tab` cycles; the focused one is drawn
+with a heavy cyan border. `j` `k` then move within it — the tree's selection,
+the diff's line cursor, or the findings pane's scroll.
 
 | | |
 |---|---|
-| `j` `k` | move through slices and files |
+| `1` `2` `3` `tab` | focus slices / diff / findings |
+| `j` `k` `↑` `↓` | move within the focused panel |
+| `space` `b` | page within the focused panel |
 | `[` `]` | previous / next slice |
 | `n` `p` | next / previous finding, anywhere in the review |
-| `↑` `↓` | scroll the diff |
-| `space` `b` | page the diff |
+| `c` | comment on the diff's cursor line |
+| `s` `A` `R` | submit as comment / approve / request changes |
 | `q` | quit |
 
 Selecting a slice shows its card — the walkthrough, its files, and every
-finding it covers — instead of a diff.
+finding it covers — instead of a diff. The last row of the tree is the draft
+review: what is staged and what will happen to it on submit.
+
+`c` opens `$EDITOR`, seeded with any finding anchored to that line. Save to
+stage the draft, save it empty to discard. Drafts persist beside the review in
+the cache, and drafted lines carry a green bar in the gutter.
 
 ### Browser keys
 
