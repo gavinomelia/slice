@@ -31,121 +31,71 @@ const conventionsSection = (conventionFiles) =>
     ? ''
     : `## Project conventions
 
-This repo states the standards this change must be judged against:
+Read these before reviewing:
 
 ${conventionFiles.map((path) => `- \`${path}\``).join('\n')}
 
-Read all of them before judging any file — first, before forming an opinion.
-
-Treat them as indexes as well as content: an entry carrying a path glob or a
-\`<!-- paths: ... -->\` comment points at a further file, and you must open the
-ones whose paths match files in this diff rather than reviewing off the one-line
-summary. Where an instruction file names conventions that are violated often,
-check those specifically against this diff.
-
-Cite the convention by name in the finding, and prefer a finding grounded in a
-documented convention over a generic one. A best practice asserted against a
-project that documents the opposite is worse than saying nothing.
+Follow referenced files and cite the relevant convention in any finding.
 `
 
-const slicingSection = (sliceKinds) => `## Step 1: Slice the change
+const slicingSection = (sliceKinds) => `## Slice the change
 
-Group the changed files into slices. A slice is the set of files that together
-deliver **one behavioral change** — a migration, the model, the controller, the
-view, and the spec that make "admins can archive a form" work are ONE slice,
-not five.
+Group changed files by behavior, not directory. Put files that implement one
+change in the same slice, and put every file in exactly one slice.
 
-Rules:
-- Slice by behavior, never by directory. Do not produce slices named "Models",
-  "Views", or "Specs".
-- Order slices so understanding accumulates: data layer, then domain, then
-  boundary, then UI, then anything standalone.
-- Within a slice, order \`paths\` in the order a reviewer should read them —
-  the thing that defines the behavior first, its tests last.
-- Every file in the list belongs to exactly one slice. No file appears twice.
-- Give each slice a short title naming the behavior ("Archive forms",
-  "Country code prefix on phone display"), not a restatement of the file names.
+Order slices from core behavior to boundaries and UI. Order paths for reading,
+with tests last. Use short behavior-based titles, never directory names.
 
-Set each slice's \`kind\` to one of:
+Set \`kind\` to one of:
 
 ${taxonomyList(sliceKinds)}
 `
 
 const SUMMARIES = `## Step 2: Write summaries
 
-**Lead with the user flow, then the mechanism.** Every summary opens by walking
-through what a person using the app does and sees — where they start, what they
-click, what is different for them afterwards — in the order they experience it.
-Only once that is established do you explain how the code delivers it.
+Lead with behavior, then mechanism. Avoid code names until the behavior is
+clear. For non-user-facing work, say what it unblocks or protects.
 
-A reviewer who does not yet know what the feature *is* cannot judge whether the
-implementation is right. Opening on class names, modules, or file structure
-forces them to reverse-engineer the intent from the diff, which is the work the
-walkthrough exists to save them.
+Word counts are ceilings. Going over is a failure; coming in well under is not.
 
-So: no class, module, table, or method name may appear before you have
-described the behavior in plain language. Write for someone who has used the
-app but has not seen this code.
-
-If a slice genuinely has no user-visible effect — a refactor, a base class, a
-migration that changes no behavior yet — say that plainly in the first
-sentence, then say what it unblocks or protects. Do not invent a user story for
-it, and do not stretch to frame plumbing as a feature.
-
-- \`overview.intent\` — the user-facing story first: who does what, and what is
-  different for them afterwards. Two or three sentences walking the flow. Then
-  at most one sentence on the overall shape of the change. Base it on the diff
-  and the PR description.
-- \`overview.assessment\` — your verdict, one short paragraph: is it sound, and
-  what is the single most important thing to change.
-- \`overview.risk\` — "low", "medium", or "high".
-- \`slices[].summary\` — open with the part of the flow this slice delivers,
-  described from the user's side. Then the mechanism: how these files work
-  together to produce it, and anything load-bearing a reviewer would otherwise
-  have to infer. Three or four sentences. Never list the files.
-- \`notes[]\` — one entry per file, \`summary\` being a single sentence on what
-  changed in it and why. These sit beside the file's diff, so they are the one
-  place to be concretely technical. Skip files in a "skim" slice.
-
-Never narrate the diff line by line. The viewer shows the diff next to your
-text; restating it wastes the reader's attention.
+- \`overview.intent\`: 25 words. Who does what, and what is different for them
+  afterwards. If the diff carries several unrelated changes, name the theme —
+  do not enumerate the slices, the reviewer is about to read them.
+- \`overview.assessment\`: 20 words. The single most important thing to change,
+  stated as an instruction. If there is nothing to change, name the riskiest
+  part of the diff instead. Do not grade the change.
+- \`overview.risk\`: \"low\", \"medium\", or \"high\".
+- \`slices[].summary\`: 35 words. The behavior, then the mechanism delivering
+  it. Never list the files.
+- \`notes[]\`: 15 words. A clause naming what changed in the file — "adds the
+  archived scope and its index", not "This file adds…". Omit \"skim\" slices.
 `
 
 const findingsSection = (severities) => `## Step 3: Report findings
 
-For each real problem, emit a finding. Severities, and the evidence each
-requires:
+Report only real problems. Available severities:
 
 ${taxonomyList(severities)}
 
-Set \`confidence\` to "confirmed" when you verified the claim by reading the
-relevant code, and "suspected" when you did not. Never state a suspicion as a
-confirmed fact — a "suspected" finding that turns out wrong is a small cost, a
-"confirmed" one that turns out wrong makes the whole review untrustworthy.
+Use \`confirmed\` only after checking the relevant code; otherwise use
+\`suspected\`.
 
-Discipline — these matter more than volume:
-- Report nothing a linter, formatter, or type checker would catch. No style,
-  spacing, import order, or unused-variable findings.
-- A file with no problems gets no findings. Most files in most PRs are fine.
-  Do not manufacture a finding so a file feels covered.
-- The same mistake in five files is ONE finding about the pattern, on the
-  clearest instance — not five findings.
-- Do not report the absence of tests for a file that has a corresponding spec
-  in the diff. Check first.
+- \`title\`: 10 words. A statement, not a question, and never "consider…". "Nil
+  author crashes the header", not "Should we handle nil here?"
+- \`why\`: 25 words. The input or state, and the wrong result it produces.
+- \`fix\`: the change, imperative. A code block beats describing code in prose;
+  no code block at all beats restating the obvious.
+
+Skip lint/style issues, healthy files, duplicate instances of one problem, and
+missing-test findings when the diff includes a corresponding spec.
 `
 
 const ANCHORING = `### Anchoring findings to lines
 
-- \`line\` is a line number in the **new** version of the file, and \`side\` is
-  "additions". This is what you want in almost every case.
-- Use \`side: "deletions"\` with a line number from the **old** file only when
-  the finding is about a line the PR removes.
-- The line MUST appear in that file's hunks in the patch. Verify it against the
-  hunk headers before emitting it.
-- If a finding is about the file as a whole, or about something outside the
-  diff, set \`line\` to null. It renders at the top of the file. This is always
-  safe — prefer it over guessing a line number.
-- \`endLine\` spans a range; set it to null for a single line.
+Use new-file lines with \`side: "additions"\`; use old-file lines and
+\`side: "deletions"\` only for removed code. Lines must be in the patch hunks.
+Use \`line: null\` for file-wide or out-of-diff findings, and \`endLine: null\`
+for a single line.
 `
 
 /** The one section nothing may override — both viewers are built against it. */
@@ -166,9 +116,9 @@ before or after it, no code fence. It must match this shape exactly:
     { "severity": "${enumList(severities)}",
       "confidence": "confirmed|suspected",
       "path": "exact/path", "line": 42, "endLine": null, "side": "additions",
-      "title": "One line naming what is wrong.",
-      "why": "The concrete failure: the input or state, and the wrong result.",
-      "fix": "The change to make. Markdown; use a fenced code block when code is shorter than prose." }
+      "title": "The defect, under ten words.",
+      "why": "One sentence: the input or state, and the wrong result.",
+      "fix": "The change, imperative. Markdown; a fenced code block beats prose about code." }
   ]
 }
 \`\`\`
@@ -237,6 +187,31 @@ You have the repo checked out at the current working directory. Read beyond the
 diff whenever a judgment depends on it — callers of a changed method, the
 sibling implementation a new file should have matched, the factory a spec
 relies on. Use Grep to find callers before claiming a change breaks them.
+
+Let the diff decide what you open. Every read should be answering a question
+some line of this patch actually raised; a reviewer is waiting on this, so
+reading the whole repo to feel thorough costs them minutes and tells them
+nothing. In particular: do not go looking for the project's own settings — CI
+config, engine and version constraints, lockfiles, the README — unless the diff
+touches them. If a question needs more than two or three reads to settle,
+report it as a \`question\` finding and move on rather than chasing it.
+
+## Register
+
+Every prose field is read by someone mid-review who wants the point. The
+sentence budgets below are limits, not targets — come in under them.
+
+- No preamble and no filler. Never open with "This change", "This PR", "This
+  slice", "The author", or "It is worth noting".
+- Do not hedge and do not soften. "Breaks on empty input" beats "may
+  potentially cause issues with certain inputs". Uncertainty belongs in
+  \`confidence\`, not in adverbs.
+- No praise, no reassurance, no summing up. "Sound overall" tells the reviewer
+  nothing they cannot get from the absence of findings.
+- Cut every word that does not change what the reader understands. Sentence
+  fragments are fine. Drop "in order to", "simply", "just", "essentially".
+- Never restate what the diff already shows — the viewer renders it beside your
+  text. Say what is not visible in the lines themselves.
 `
 
   const sections = [

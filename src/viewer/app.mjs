@@ -318,11 +318,28 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
   const [loading, setLoading] = useState(false)
   const [drafts, setDrafts] = useState(() => loadDrafts(reviewPath))
   const [status, setStatus] = useState(() =>
-    ui.warnings.length ? { tone: theme.risk.medium, text: ui.warnings.join(' · ') } : null,
+    // Longer than the default: this one is on screen before you are looking at
+    // it, and it is the only report of what the analysis got wrong.
+    ui.warnings.length ? { tone: theme.risk.medium, text: ui.warnings.join(' · '), ms: 6000 } : null,
   )
   const [focus, setFocus] = useState('tree')
   const [findScroll, setFindScroll] = useState(0)
   const [zoomed, setZoomed] = useState(false)
+
+  /**
+   * A status message sits where the shortcut line goes, so it has to give it
+   * back on its own — otherwise one refused keystroke costs you the shortcuts
+   * for the rest of the session, and there is no key to dismiss it.
+   *
+   * A caller whose message must outlive the timer says so: `ms` sets its own
+   * lifetime, and `ms: null` keeps it up until something replaces it, which is
+   * what an operation still in flight wants.
+   */
+  useEffect(() => {
+    if (!status || status.ms === null) return
+    const timer = setTimeout(() => setStatus(null), status.ms ?? 2500)
+    return () => clearTimeout(timer)
+  }, [status])
 
   const current = tree[treeIndex]
   const path = current?.type === 'file' ? current.path : null
@@ -392,7 +409,19 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
   const shrink = wanted > budget ? budget / wanted : 1
   const treeWidth = Math.max(16, Math.round(layout.treeWidth * shrink))
   const findWidth = Math.max(20, Math.round(layout.findingsWidth * shrink))
-  const diffWidth = zoomed ? size.cols : Math.max(20, size.cols - treeWidth - findWidth)
+
+  // A file or slice with nothing to say gets no findings pane at all, not an
+  // empty one — the diff takes the width back instead of framing silence.
+  const findingsVisible = !zoomed && findings.length > 0
+  const diffWidth = zoomed
+    ? size.cols
+    : Math.max(20, size.cols - treeWidth - (findingsVisible ? findWidth : 0))
+
+  // Moving to a file or slice with no findings can pull the rug out from
+  // under a focused findings pane — send focus somewhere still on screen.
+  useEffect(() => {
+    if (!findingsVisible && focus === 'findings') setFocus('diff')
+  }, [findingsVisible, focus])
 
   // Border 2 + paddingX 2 + the scrollbar column.
   const inner = (width) => Math.max(8, width - 5)
@@ -480,7 +509,8 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
       redraw: () => ink.instance?.clear(),
     })
 
-    setStatus({ tone: theme.ui.muted, text: 'Posting…' })
+    // Still in flight, so it stays until the result replaces it.
+    setStatus({ tone: theme.ui.muted, text: 'Posting…', ms: null })
     const result = await postReview({
       repo,
       number,
@@ -501,7 +531,8 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
       result.downgraded ? 'downgraded to a plain comment (your own PR)' : null,
       result.orphanCount ? `${result.orphanCount} appended to the body` : null,
     ].filter(Boolean)
-    setStatus({ tone: theme.ui.draft, text: `${notes.join(' · ')}. ${result.url ?? ''}`.trim() })
+    // Carries the URL of the posted review, which is worth long enough to read.
+    setStatus({ tone: theme.ui.draft, text: `${notes.join(' · ')}. ${result.url ?? ''}`.trim(), ms: 10000 })
   }
 
   const found = useMemo(() => findingLines(findings, active, inner(findWidth), ui), [findings, active, findWidth, ui])
@@ -581,10 +612,11 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
     }
 
     // Asking for a hidden pane means you want it back, so a number key unzooms
-    // rather than doing nothing.
+    // rather than doing nothing — except pane 3, which stays inert when there
+    // are no findings to show, because there is nothing to bring back.
     if (input === '1') return setZoomed(false), setFocus('tree')
     if (input === '2') return setFocus('diff')
-    if (input === '3') return setZoomed(false), setFocus('findings')
+    if (input === '3' && findingsVisible) return setZoomed(false), setFocus('findings')
     if (input === 'z') {
       const next = !zoomed
       setZoomed(next)
@@ -593,7 +625,9 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
     }
     if (key.tab) {
       if (zoomed) return setFocus('diff')
-      return setFocus(PANES[(PANES.indexOf(focus) + (key.shift ? 2 : 1)) % 3])
+      const visible = findingsVisible ? PANES : ['tree', 'diff']
+      const at = Math.max(0, visible.indexOf(focus))
+      return setFocus(visible[(at + (key.shift ? -1 : 1) + visible.length) % visible.length])
     }
 
     if (input === 'j' || key.downArrow) return moveIn(1)
@@ -825,12 +859,12 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
             : rows.slice(centreTop, centreTop + bodyHeight).map((row, i) => diffRow(row, centreTop + i)),
       ),
 
-      zoomed
+      !findingsVisible
         ? null
         : h(
             Pane,
             {
-              title: `FINDINGS${findings.length ? ` ${Math.min(active + 1, findings.length)}/${findings.length}` : ''}`,
+              title: `FINDINGS ${Math.min(active + 1, findings.length)}/${findings.length}`,
               number: 3,
               focused: focus === 'findings',
               width: findWidth,
@@ -839,9 +873,7 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
               top: foundTop,
               height: bodyHeight,
             },
-            findings.length === 0
-              ? h(Text, { color: theme.ui.muted }, path ? 'none for this file' : 'none')
-              : h(Lines, { lines: found.lines, top: foundTop, height: bodyHeight }),
+            h(Lines, { lines: found.lines, top: foundTop, height: bodyHeight }),
           ),
     ),
 

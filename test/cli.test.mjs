@@ -10,8 +10,8 @@
  */
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { after, test } from 'node:test'
@@ -46,6 +46,13 @@ test('--help names the command and both positional forms', () => {
   assert.equal(status, 0)
   assert.match(stdout, /slice 1679/)
   assert.match(stdout, /slice my-branch/)
+  assert.match(stdout, /--ai/)
+})
+
+test('no analysis runs unless --ai is passed', () => {
+  const { status, stdout } = slice('feature-branch', '--branch')
+  assert.equal(status, 0)
+  assert.match(stdout, /no AI analysis/)
 })
 
 test('an unknown option is rejected as an option, not read as a branch', () => {
@@ -67,16 +74,36 @@ test('a branch that does not exist says so, and says it is not a PR either', () 
 })
 
 test('a named branch is diffed against its base', () => {
-  const { status, stdout } = slice('feature-branch', '--branch', '--no-analyze')
+  // No --ai, so this never touches the model — analysis is opt-in.
+  const { status, stdout } = slice('feature-branch', '--branch')
   assert.equal(status, 0)
   assert.match(stdout, /branch feature-branch vs main/)
   assert.match(stdout, /1 changed file/, 'the named branch is diffed even though main is checked out')
 })
 
+test('with no AI analysis, files are ordered by when they were first committed, not alphabetically', () => {
+  git('checkout', '-q', '-b', 'order-branch')
+  writeFileSync(join(repo, 'z.rb'), 'first\n')
+  git('add', '-A')
+  git('commit', '-q', '-m', 'touch z first')
+  writeFileSync(join(repo, 'a.rb'), 'second\n')
+  git('add', '-A')
+  git('commit', '-q', '-m', 'touch a second')
+  git('checkout', '-q', 'main')
+
+  const { status, stderr } = slice('order-branch', '--branch')
+  assert.equal(status, 0, stderr)
+
+  const slug = repo.split('/').pop().replace(/[^a-zA-Z0-9]+/g, '-')
+  const reviewPath = join(homedir(), '.cache', 'slice', slug, 'branch-order-branch.review.json')
+  const review = JSON.parse(readFileSync(reviewPath, 'utf8'))
+  assert.deepEqual(review.slices[0].paths, ['z.rb', 'a.rb'])
+})
+
 test('probing git does not leak the child stderr', () => {
   // The repo has no remote, so origin/HEAD lookups fail on every run. Those
   // are expected misses and must not surface as "fatal:" noise.
-  const { stderr } = slice('feature-branch', '--branch', '--no-analyze')
+  const { stderr } = slice('feature-branch', '--branch')
   assert.ok(!stderr.includes('fatal:'), stderr)
 })
 

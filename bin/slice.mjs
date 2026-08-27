@@ -27,11 +27,14 @@ Usage:
   slice my-branch    review that branch's PR, or diff the branch if it has none
   slice --branch     review the local branch diff, ignoring any open PR
 
+  By default this just opens the diff in the viewer — no model runs. Pass
+  --ai for the AI-analyzed review: slices, summaries, and findings.
+
 Options:
+  -a, --ai          run the AI analysis (slicing, summaries, findings)
   --branch          diff the local branch against its base instead of a PR
   --base <ref>      base ref for --branch mode (default: the repo default branch)
-  --refresh         re-run the analysis even if a cached one exists
-  --no-analyze      skip the analysis; open the viewer with the diff only
+  --refresh         re-run the analysis even if a cached one exists (implies --ai)
   --open <file>     open a cached review.json without touching git or the model
   --timeout <s>     give up on the analysis after this many seconds (default 600)
   -h, --help        show this
@@ -85,7 +88,7 @@ function parseArgs(argv) {
     branch: false,
     base: null,
     refresh: false,
-    analyze: true,
+    analyze: false,
     open: null,
     timeout: 600,
     config: null,
@@ -109,7 +112,7 @@ function parseArgs(argv) {
       options.initConfig = ['repo', 'user'].includes(argv[i + 1]) ? argv[++i] : 'repo'
     } else if (arg === '--branch') options.branch = true
     else if (arg === '--refresh') options.refresh = true
-    else if (arg === '--no-analyze') options.analyze = false
+    else if (arg === '-a' || arg === '--ai') options.analyze = true
     else if (arg === '--base') options.base = argv[++i]
     else if (arg === '--timeout') options.timeout = Number(argv[++i]) || 600
     else if (arg.startsWith('-')) fail(`unknown option "${arg}"\n${USAGE}`)
@@ -119,6 +122,9 @@ function parseArgs(argv) {
     // matters once we know whether a PR came back.
     else options.ref = arg
   }
+  // Asking to redo the analysis implies wanting it in the first place —
+  // otherwise --refresh with no --ai would silently do nothing.
+  if (options.refresh) options.analyze = true
   return options
 }
 
@@ -144,7 +150,15 @@ function defaultBranch(repoRoot) {
   return 'main'
 }
 
-/** `ref` may be a PR number, a branch name, or a URL — gh resolves all three. */
+/**
+ * `ref` may be a PR number, a branch name, or a URL — gh resolves all three.
+ *
+ * `ref` naming a URL can point at a repo other than the one `repoRoot` is a
+ * checkout of — reviewing a PR you have not cloned is an ordinary thing to
+ * want. So the repo this PR actually lives in is read from `pr.url`, which
+ * `gh` fills in from wherever it resolved `ref` to, rather than from `gh repo
+ * view` on `repoRoot`, which names the wrong repo whenever those two differ.
+ */
 function resolvePrTarget(repoRoot, ref) {
   const fields = 'number,title,author,url,baseRefName,headRefName,headRefOid'
   const args = ['pr', 'view', ...(ref ? [String(ref)] : []), '--json', fields]
@@ -152,7 +166,9 @@ function resolvePrTarget(repoRoot, ref) {
   if (!raw) return null
 
   const pr = JSON.parse(raw)
-  const repo = tryRun('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'], { cwd: repoRoot })
+  const repo =
+    pr.url?.match(/github\.com\/([^/]+\/[^/]+)\/pull\//)?.[1] ??
+    tryRun('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'], { cwd: repoRoot })
   const viewer = tryRun('gh', ['api', 'user', '-q', '.login'], { cwd: repoRoot })
 
   return {
@@ -207,7 +223,11 @@ function resolveBranchTarget(repoRoot, base, ref = null) {
 
 function capturePatch(repoRoot, target) {
   if (target.kind === 'pr') {
-    const patch = tryRun('gh', ['pr', 'diff', String(target.number)], { cwd: repoRoot })
+    // Without --repo, gh infers the repo from repoRoot's own remote — wrong
+    // whenever the PR lives somewhere else, which a URL or cross-repo number
+    // both allow. target.repo, resolved from the PR itself, is what to trust.
+    const args = ['pr', 'diff', String(target.number), ...(target.repo ? ['--repo', target.repo] : [])]
+    const patch = tryRun('gh', args, { cwd: repoRoot })
     if (patch === null) fail(`could not read the diff for PR #${target.number}`)
     return patch
   }
@@ -215,6 +235,51 @@ function capturePatch(repoRoot, target) {
     fail(`base ref "${target.baseRef}" does not exist locally`)
   }
   return run('git', ['diff', `${target.baseRef}...${target.headRev ?? 'HEAD'}`], { cwd: repoRoot })
+}
+
+/**
+ * The order files were first touched in the commit history, oldest first.
+ *
+ * Without an AI analysis to group files by behavior, this is the next best
+ * ordering: it tends to put the model or migration before the controller
+ * before the view, because that is usually the order a change was built in.
+ *
+ * Returns null rather than throwing when the range is not available locally
+ * — a PR whose commits were never fetched, most commonly — so the caller can
+ * fall back to the diff's own order.
+ */
+function commitOrder(repoRoot, target) {
+  const head = target.kind === 'pr' ? target.headSha : (target.headRev ?? 'HEAD')
+  const log = tryRun(
+    'git',
+    ['log', '--reverse', '--no-merges', '--name-only', '--format=', `${target.baseRef}..${head}`],
+    { cwd: repoRoot },
+  )
+  if (log === null) return null
+
+  const order = []
+  const seen = new Set()
+  for (const line of log.split('\n')) {
+    const path = line.trim()
+    if (!path || seen.has(path)) continue
+    seen.add(path)
+    order.push(path)
+  }
+  return order
+}
+
+/**
+ * Sort changed files by `commitOrder`. A file that order does not mention —
+ * git attributing a rename to its old name, most commonly — keeps its place
+ * at the end, in the order the diff already had it.
+ */
+function orderByCommit(files, order) {
+  if (!order) return files
+  const rank = new Map(order.map((path, i) => [path, i]))
+  return files
+    .map((file, i) => ({ file, i, rank: rank.get(file.path) ?? rank.get(file.prevPath) ?? Infinity }))
+    .sort((a, b) => a.rank - b.rank || a.i - b.i)
+    .map(({ file }) => file)
 }
 
 /**
@@ -318,6 +383,30 @@ function runAnalysis({ repoRoot, target, patchPath, filesPath, rawPath, timeoutM
     process.stderr.write(`\r  analyzing — reading the repo… ${Math.round((Date.now() - startedAt) / 1000)}s`)
   }, 1000)
 
+  // Read, Grep, and Glob are the only tools the default config grants, and
+  // neither needs an MCP server — but claude still connects every MCP server
+  // configured at the user or project level before the first token, which on
+  // a machine with a dozen of them can be most of the run's wall-clock time.
+  // Skip that handshake unless a convention explicitly asked for an MCP tool.
+  const allowedTools = config.review.allowedTools ?? []
+  const usesMcp = allowedTools.some((tool) => tool.startsWith('mcp__'))
+
+  /**
+   * Restricting the tools takes two flags, and they do different jobs.
+   *
+   * `--tools` decides which tools exist; `--allowed-tools` decides which of
+   * the surviving ones run without stopping to ask. Passing only the second —
+   * which is what this did until someone timed it — leaves Bash, Write, and
+   * Task in the model's hands, and a review that *can* run the test suite
+   * does: measured on a seven-file diff, `npm test` was attempted four times,
+   * two of those retries after the sandbox refused, for about a hundred
+   * seconds that told the reviewer nothing.
+   *
+   * `--tools` names built-ins only. An MCP tool arrives with its server rather
+   * than from this list, so it stays out of here and in `--allowed-tools`.
+   */
+  const builtinTools = allowedTools.filter((tool) => !tool.startsWith('mcp__'))
+
   const child = spawn(
     'claude',
     [
@@ -326,9 +415,16 @@ function runAnalysis({ repoRoot, target, patchPath, filesPath, rawPath, timeoutM
       '--output-format',
       'json',
       ...(config.review.model ? ['--model', config.review.model] : []),
-      // An empty list means "no tools", which is a bare --allowed-tools that
-      // would swallow the next argument. Omit the flag instead.
-      ...(config.review.allowedTools?.length ? ['--allowed-tools', ...config.review.allowedTools] : []),
+      ...(config.review.effort ? ['--effort', config.review.effort] : []),
+      // An empty string is how --tools spells "nothing at all", so a config
+      // that grants no tools is honoured rather than quietly granting every
+      // one of them.
+      '--tools',
+      builtinTools.join(','),
+      // An empty list, by contrast, is a bare --allowed-tools that would
+      // swallow the next argument. Omit the flag instead.
+      ...(allowedTools.length ? ['--allowed-tools', ...allowedTools] : []),
+      ...(usesMcp ? [] : ['--strict-mcp-config']),
     ],
     { cwd: repoRoot, stdio: ['ignore', 'pipe', 'pipe'] },
   )
@@ -467,7 +563,7 @@ async function main() {
   console.log(`\n  ${target.title}\n  ${label}\n`)
 
   const patch = capturePatch(repoRoot, target)
-  const files = splitPatch(patch)
+  const files = orderByCommit(splitPatch(patch), commitOrder(repoRoot, target))
   if (files.length === 0) fail('no file changes found in the diff')
   console.log(`  ${files.length} changed file(s)`)
 
@@ -500,7 +596,7 @@ async function main() {
 
   let analysis = null
   if (!options.analyze) {
-    console.log('  skipping analysis (--no-analyze)')
+    console.log('  no AI analysis (pass --ai for slices, summaries, and findings)')
   } else if (existsSync(analysisPath) && !options.refresh) {
     console.log('  using cached analysis (--refresh to redo)')
     try {

@@ -56,13 +56,22 @@ const REPO = `{
     // .github/instructions/*.md and docs/CONVENTIONS.md.
     // "conventionFiles": ["docs/REVIEW_STANDARDS.md"],
 
-    // Tools the analysis may use. Read-only by default: the run is
+    // Tools the analysis may use. This is the whole toolset, not just the
+    // pre-approved part, and it is read-only by default: the run is
     // non-interactive, so anything that asks permission hangs forever. Add an
     // MCP server here if your conventions tell the review to check a ticket.
+    // Adding "Bash" is a bad trade — the review will run your test suite.
     // "allowedTools": ["Read", "Grep", "Glob", "mcp__linear__get_issue"],
 
-    // Passed to \`claude --model\`. null uses your CLI default.
+    // Passed to \`claude --model\`. Defaults to "sonnet"; set null to inherit
+    // your CLI default instead.
     // "model": "opus",
+
+    // Passed to \`claude --effort\`. Defaults to "low", which is roughly 2.5x
+    // faster than "medium" because the extra thinking widens the search rather
+    // than sharpening the verdict. Raise it for diffs whose correctness turns
+    // on reasoning rather than reading. null inherits your CLI default.
+    // "effort": "medium",
 
     // Replace the ENTIRE prompt with a file, relative to the repo root. The
     // escape hatch. Placeholders substituted before sending:

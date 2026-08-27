@@ -81,8 +81,26 @@ export const DEFAULT_SLICE_KINDS = {
 
 export const DEFAULT_CONFIG = {
   review: {
-    /** `claude --model`. null uses whatever the CLI is configured to. */
-    model: null,
+    /**
+     * `claude --model`. Sonnet by default — fast enough for a read-heavy
+     * review without waiting on Opus. Set to null to inherit whatever the
+     * CLI is configured to use instead.
+     */
+    model: 'sonnet',
+
+    /**
+     * `claude --effort`: how much reasoning the analysis gets.
+     *
+     * "low" by default, and the difference is not subtle. The same seven-file
+     * diff took 68s at "low" and 166s at "medium", because the extra thinking
+     * is spent widening the search rather than sharpening the verdict — the
+     * long runs wander off into the CI workflow and the README's Node version.
+     *
+     * Raise it to "medium" or "high" for a diff whose correctness genuinely
+     * turns on reasoning rather than reading: a tricky algorithm, a migration
+     * with a data-loss path. Set to null to inherit the CLI's own setting.
+     */
+    effort: 'low',
 
     /**
      * Tools the analysis may use.
@@ -91,6 +109,11 @@ export const DEFAULT_CONFIG = {
      * a permission prompt hangs forever with nobody to answer it. Add an MCP
      * server here (`mcp__linear__*`) if your conventions ask the review to
      * check a ticket — without it, that instruction is silently a no-op.
+     *
+     * This list is the whole toolset, not just the pre-approved part of it, so
+     * dropping Grep really does mean the review cannot search. Adding Bash is
+     * a bad trade: the model will find a way to run the test suite with it,
+     * which is minutes of wall-clock for something CI already answered.
      */
     allowedTools: ['Read', 'Grep', 'Glob'],
 

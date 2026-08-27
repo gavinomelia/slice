@@ -25,7 +25,7 @@ test('conventions appear only when there are convention files', () => {
 test('a section override appends by default and replaces on request', () => {
   const appended = build(mergePatch(DEFAULT_CONFIG, { review: { slicing: 'HOUSE RULE.' } }))
   assert.match(appended, /HOUSE RULE\./)
-  assert.match(appended, /Slice by behavior/, 'appending keeps the built-in section')
+  assert.match(appended, /Group changed files by behavior/, 'appending keeps the built-in section')
 
   const replaced = build(mergePatch(DEFAULT_CONFIG, { review: { findings: { replace: 'ONLY SECURITY.' } } }))
   assert.match(replaced, /ONLY SECURITY\./)

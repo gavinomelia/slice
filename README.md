@@ -2,20 +2,27 @@
 
 A pull request is not a pile of files. It's a few behavioral changes that
 happen to touch a lot of directories. `slice` reads it that way: the diff in
-your terminal, AI analysis beside it, and the changed files **grouped by
-behavioral slice** rather than by path.
+your terminal, optionally with AI analysis beside it, and the changed files
+**grouped by behavioral slice** rather than by path.
 
 ```
-slice 1679        # review PR #1679
+slice 1679        # browse the diff for PR #1679
 slice my-branch   # that branch's PR, or diff the branch if it has none
 slice             # the PR for the current branch, or the branch diff
 slice --branch    # local branch vs its base, before a PR exists
+slice 1679 --ai   # the same, with the AI-analyzed review — slices, summaries, findings
 ```
 
 The positional argument is a PR number or a branch name — `gh` resolves either,
 so `slice ccc-642-implement-posts-on-portal` finds that branch's PR and falls
 back to diffing the branch when there isn't one. A branch you have fetched but
 never checked out works too.
+
+By default `slice` just opens the diff — no model runs, nothing to wait on.
+Pass `--ai` when you want the analyzed review. Without it, files aren't grouped
+into slices, but they are still ordered by when they were first committed
+rather than alphabetically — usually close to the order the change was built
+in, and a reasonable one to review in.
 
 <!-- demo: record an asciinema cast or GIF of a real sliced review and embed it here -->
 
@@ -156,7 +163,8 @@ built-in instructions; `{ "replace": "..." }` swaps the section out.
 
     "severities": { "nit": null },        // stop reporting nits entirely
     "allowedTools": ["Read", "Grep", "Glob", "mcp__linear__get_issue"],
-    "model": "opus"
+    "model": "opus",
+    "effort": "medium"                    // more reasoning, ~3x the wall-clock
   }
 }
 ```
@@ -181,7 +189,15 @@ against its shape.
 analysis runs non-interactively, so a tool that triggers a permission prompt
 hangs forever with nobody to answer it — which also means an instruction file
 that asks the review to check a ticket is silently a no-op until you add the
-MCP server here.
+MCP server here. It is also the entire toolset rather than a list of
+pre-approved tools, so adding `Bash` really does mean the review can run your
+test suite, and given the chance it will.
+
+`effort` is the speed dial, and `low` is the default. On a seven-file diff that
+is 46s against 166s at `medium`, because the extra thinking goes into widening
+the search rather than sharpening the verdict — the expensive runs wander off
+into the CI config and the README. Raise it for a diff whose correctness turns
+on reasoning rather than reading.
 
 ### Appearance
 
@@ -204,8 +220,8 @@ missing.
 ## Caching
 
 Artifacts are cached in `~/.cache/slice/<repo>/`, outside the repo, so reviewing
-never dirties your working tree. Re-run with `--refresh` to redo the analysis,
-or `--no-analyze` to just browse the diff.
+never dirties your working tree. Re-run with `--ai --refresh` to redo the
+analysis; plain `--ai` reuses the cached one if there is one.
 
 Re-open a cached review for free, without touching git, `gh`, or the model:
 
