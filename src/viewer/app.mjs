@@ -26,62 +26,20 @@ import {
 } from './markdown.mjs'
 import { composeInEditor, loadDrafts, saveDrafts, seedFromFinding } from './compose.mjs'
 import { partitionDrafts, postReview } from './github.mjs'
+import { buildTree, cellAt, draftKey, rowHasLine, sideAt, windowFor } from './tree.mjs'
 import { viewerConfig } from './theme.mjs'
 
 const PANES = ['tree', 'diff', 'findings']
 
-/**
- * Slices flattened into one selectable list. Headers are selectable too.
- *
- * `last` marks the final file of a slice so the tree can close the group with
- * a corner rather than a tee — the one cue that tells you where a slice ends
- * without counting.
- */
-function buildTree(review) {
-  const rows = [{ type: 'overview' }]
-  for (const [index, slice] of review.slices.entries()) {
-    rows.push({ type: 'slice', sliceIndex: index })
-    const paths = slice.paths.filter((path) => review.files[path])
-    paths.forEach((path, at) => rows.push({ type: 'file', sliceIndex: index, path, last: at === paths.length - 1 }))
-  }
-  // Only a PR can receive a review, so a branch diff gets no drafts row.
-  if (review.target.kind === 'pr' && review.target.number) rows.push({ type: 'drafts' })
-  return rows
-}
-
 const findingsFor = (review, path) => review.findings.filter((f) => f.path === path)
-
-/**
- * The diff row the cursor is actually on.
- *
- * Unified rows are their own answer. A split row is a pair, and only one of its
- * two columns can be commented on at a time — so the side the user asked for
- * wins, falling back to whichever column exists. Half-empty pairs are the norm
- * (an insert has no left, a delete has no right), and a cursor pointing at
- * nothing would make `c` fail on rows that look perfectly commentable.
- */
-const cellAt = (row, side) => {
-  if (!row) return null
-  if (row.kind !== 'pair') return row.kind === 'hunk' ? null : row
-  return (side === 'left' ? row.left : row.right) ?? row.left ?? row.right ?? null
-}
-
-/** Which column the cursor mark is drawn in, after that same fallback. */
-const sideAt = (row, side) => {
-  if (row?.kind !== 'pair') return side
-  return (side === 'left' ? row.left : row.right) ? side : side === 'left' ? 'right' : 'left'
-}
-
-/** Does this display row carry `line` in either column? Used to chase a finding's anchor. */
-const rowHasLine = (row, line) =>
-  row.kind === 'pair' ? row.left?.line === line || row.right?.line === line : row.kind !== 'hunk' && row.line === line
-
-const draftKey = (path, side, line) => `${path}:${side}:${line ?? 'file'}`
 
 /** A row of severity glyphs, so a count reads as "what kind" not just "how many". */
 function severityGlyphs(findings, ui, limit = 4) {
   const shown = findings.slice(0, limit)
-  const segments = shown.map((finding) => ({ text: ui.severity(finding.severity).glyph, color: ui.severity(finding.severity).color }))
+  const segments = shown.map((finding) => ({
+    text: ui.severity(finding.severity).glyph,
+    color: ui.severity(finding.severity).color,
+  }))
   if (findings.length > shown.length) segments.push({ text: '+', color: ui.theme.ui.muted })
   return segments
 }
@@ -126,7 +84,12 @@ function draftsCard(review, drafts, width, ui) {
   }
 
   lines.push(plain('SUBMIT', { color: ui.theme.ui.heading, bold: true }))
-  lines.push(...markdownLines('`s` comment · `A` approve · `R` request changes — each opens $EDITOR for the review body first.', width))
+  lines.push(
+    ...markdownLines(
+      '`s` comment · `A` approve · `R` request changes — each opens $EDITOR for the review body first. Save it empty to cancel.',
+      width,
+    ),
+  )
   return lines
 }
 
@@ -146,10 +109,7 @@ function sliceCard(review, slice, width, ui) {
   ]
   for (const path of slice.paths) {
     const findings = findingsFor(review, path)
-    lines.push([
-      { text: `  ${path}` },
-      ...(findings.length ? [{ text: '  ' }, ...severityGlyphs(findings, ui)] : []),
-    ])
+    lines.push([{ text: `  ${path}` }, ...(findings.length ? [{ text: '  ' }, ...severityGlyphs(findings, ui)] : [])])
   }
   return lines
 }
@@ -314,12 +274,6 @@ const Lines = ({ lines, top, height }) =>
     ),
   )
 
-/** Keep `index` visible inside a window of `height` rows. */
-function windowFor(index, total, height) {
-  if (total <= height) return 0
-  return Math.max(0, Math.min(index - Math.floor(height / 2), total - height))
-}
-
 function App({ review, reviewPath, repoRoot, ink, ui }) {
   const { exit } = useApp()
   const { stdout } = useStdout()
@@ -466,9 +420,7 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
   // A file or slice with nothing to say gets no findings pane at all, not an
   // empty one — the diff takes the width back instead of framing silence.
   const findingsVisible = !zoomed && findings.length > 0
-  const diffWidth = zoomed
-    ? size.cols
-    : Math.max(20, size.cols - treeWidth - (findingsVisible ? findWidth : 0))
+  const diffWidth = zoomed ? size.cols : Math.max(20, size.cols - treeWidth - (findingsVisible ? findWidth : 0))
 
   // Moving to a file or slice with no findings can pull the rug out from
   // under a focused findings pane — send focus somewhere still on screen.
@@ -561,7 +513,8 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
       return setStatus({ tone: theme.risk.medium, text: 'This is a branch diff, not a PR — nothing to post to.' })
     }
 
-    const verb = event === 'APPROVE' ? 'Approving' : event === 'REQUEST_CHANGES' ? 'Requesting changes on' : 'Commenting on'
+    const verb =
+      event === 'APPROVE' ? 'Approving' : event === 'REQUEST_CHANGES' ? 'Requesting changes on' : 'Commenting on'
     const { comments, orphans } = partitionDrafts(drafts)
     const context = [
       `─── ${drafts.length} draft comment(s) will be posted with this ───`,
@@ -577,7 +530,15 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
       hint: `# ${verb} ${repo}#${number}.`,
       context,
       redraw,
+      onEmpty: 'cancel',
     })
+
+    // `s`, `A` and `R` are single unmodified keystrokes that publish to
+    // somebody else's pull request, and there is no unsend. The editor is the
+    // confirmation step, and an empty buffer aborts — the same bargain `git
+    // commit` makes. Posting line comments with no covering note therefore
+    // costs you one word, which is a fair price for not posting by accident.
+    if (!body) return setStatus({ tone: theme.ui.muted, text: 'Submit cancelled — the review body was empty.' })
 
     // Still in flight, so it stays until the result replaces it.
     setStatus({ tone: theme.ui.muted, text: 'Posting…', ms: null })
@@ -664,7 +625,9 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
   const toggleSplit = () => {
     const anchor = cellAt(view[cursor], side)
     const next = split ? rows : paired
-    const at = anchor ? next.findIndex((r) => (r.kind === 'pair' ? r.left === anchor || r.right === anchor : r === anchor)) : -1
+    const at = anchor
+      ? next.findIndex((r) => (r.kind === 'pair' ? r.left === anchor || r.right === anchor : r === anchor))
+      : -1
     setSplit(!split)
     setCursor(at >= 0 ? at : 0)
   }
@@ -688,7 +651,11 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
   })
 
   function handleKey(input, key) {
-    if (input === 'q' || key.escape || (key.ctrl && input === 'c')) return exit()
+    // Escape used to quit, sharing that with `q`. It is the key people press to
+    // back out of something, and here it threw away a session with unposted
+    // drafts in it — so it dismisses the status line and nothing more.
+    if (key.escape) return setStatus(null)
+    if (input === 'q' || (key.ctrl && input === 'c')) return exit()
 
     if (input === 'c') return void commentOnCursor().catch((e) => setStatus({ tone: theme.risk.high, text: e.message }))
     if (input === 's' || input === 'A' || input === 'R') {
@@ -699,9 +666,9 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
     // Asking for a hidden pane means you want it back, so a number key unzooms
     // rather than doing nothing — except pane 3, which stays inert when there
     // are no findings to show, because there is nothing to bring back.
-    if (input === '1') return setZoomed(false), setFocus('tree')
+    if (input === '1') return (setZoomed(false), setFocus('tree'))
     if (input === '2') return setFocus('diff')
-    if (input === '3' && findingsVisible) return setZoomed(false), setFocus('findings')
+    if (input === '3' && findingsVisible) return (setZoomed(false), setFocus('findings'))
     if (input === 'v') return toggleSplit()
     // Uppercase, because h/l are already the diff's sideways scroll and split
     // view needs that more than unified does — half the width means twice the
@@ -740,7 +707,7 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
       const here = current?.sliceIndex ?? -1
       const target = Math.max(0, Math.min(review.slices.length - 1, here + (input === ']' ? 1 : -1)))
       const at = tree.findIndex((r) => r.type === 'slice' && r.sliceIndex === target)
-      if (at >= 0) setTreeIndex(at), setZoomed(false), setFocus('tree')
+      if (at >= 0) (setTreeIndex(at), setZoomed(false), setFocus('tree'))
       return
     }
 
@@ -761,22 +728,23 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
 
   const foundTop = Math.max(0, Math.min(findScroll, Math.max(0, found.lines.length - bodyHeight)))
 
-  const centreTitle = current?.type === 'overview'
-    ? 'OVERVIEW'
-    : current?.type === 'drafts'
-      ? `DRAFT REVIEW${drafts.length ? ` (${drafts.length})` : ''}`
-      : current?.type === 'slice'
-        ? `SLICE ${current.sliceIndex + 1}/${review.slices.length}`
-        : [
-            path,
-            view.length ? `L${cellAt(view[cursor], side)?.line ?? '–'}` : '',
-            view.length ? `${centreTop + 1}-${Math.min(view.length, centreTop + bodyHeight)}/${view.length}` : '',
-            hOffset > 0 ? `→${hOffset}` : '',
-            split ? 'split' : '',
-            zoomed ? 'zoom' : '',
-          ]
-            .filter(Boolean)
-            .join('  ')
+  const centreTitle =
+    current?.type === 'overview'
+      ? 'OVERVIEW'
+      : current?.type === 'drafts'
+        ? `DRAFT REVIEW${drafts.length ? ` (${drafts.length})` : ''}`
+        : current?.type === 'slice'
+          ? `SLICE ${current.sliceIndex + 1}/${review.slices.length}`
+          : [
+              path,
+              view.length ? `L${cellAt(view[cursor], side)?.line ?? '–'}` : '',
+              view.length ? `${centreTop + 1}-${Math.min(view.length, centreTop + bodyHeight)}/${view.length}` : '',
+              hOffset > 0 ? `→${hOffset}` : '',
+              split ? 'split' : '',
+              zoomed ? 'zoom' : '',
+            ]
+              .filter(Boolean)
+              .join('  ')
 
   /** The seam between hunks: a rule rather than a bare @@, so it spans the pane. */
   const hunkRow = (row, index) => {
@@ -814,9 +782,13 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
       ...segment,
       bg: segment.word ? wordBg : lineBg,
     }))
-    const code = padSegments(clipped ? [...visible, { text: '›', color: theme.ui.muted, bg: lineBg }] : visible, codeWidth, {
-      bg: lineBg,
-    })
+    const code = padSegments(
+      clipped ? [...visible, { text: '›', color: theme.ui.muted, bg: lineBg }] : visible,
+      codeWidth,
+      {
+        bg: lineBg,
+      },
+    )
 
     return [
       h(
@@ -826,7 +798,13 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
       ),
       h(
         Text,
-        { key: `${prefix}no`, color: theme.diff.lineNumber, backgroundColor: lineBg, inverse: selected, dimColor: !selected },
+        {
+          key: `${prefix}no`,
+          color: theme.diff.lineNumber,
+          backgroundColor: lineBg,
+          inverse: selected,
+          dimColor: !selected,
+        },
         String(line ?? '').padStart(5) + ' ',
       ),
       h(
@@ -964,7 +942,11 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
                 const s = review.slices[row.sliceIndex]
                 return h(
                   Text,
-                  { ...base, bold: true, color: selected ? theme.ui.accent : (ui.sliceKind(s.kind).color ?? undefined) },
+                  {
+                    ...base,
+                    bold: true,
+                    color: selected ? theme.ui.accent : (ui.sliceKind(s.kind).color ?? undefined),
+                  },
                   `${row.sliceIndex + 1} · ${s.title}`,
                 )
               }
@@ -1039,7 +1021,7 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
  * which cost an extra node startup and a round of env-var marshalling to say
  * "here is a file path".
  */
-export async function runViewer({ review, reviewPath, repoRoot = process.cwd() }) {
+export async function runViewer({ review, reviewPath, repoRoot = process.cwd(), config = null, warnings = [] }) {
   // Ink needs raw mode on a real terminal. Without this guard, piping the
   // output or running under CI ends in a wall of React reconciler stack trace
   // that says nothing about what actually went wrong. The analysis is the
@@ -1057,7 +1039,7 @@ export async function runViewer({ review, reviewPath, repoRoot = process.cwd() }
     return
   }
 
-  const ui = viewerConfig({ review, cwd: repoRoot })
+  const ui = viewerConfig({ review, cwd: repoRoot, config, warnings })
   ui.syntax = await resolveSyntaxTheme(ui.theme.syntax)
   setMarkdownTheme(ui.theme.markdown)
 

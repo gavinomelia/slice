@@ -29,7 +29,14 @@ export function saveDrafts(reviewPath, drafts) {
   writeFileSync(path, JSON.stringify(drafts, null, 2))
 }
 
-const stripComments = (text) =>
+/**
+ * What survives from the editor buffer: everything that is not a `#` line.
+ *
+ * Only a `#` in the first column counts, so a comment body may talk about `C#`
+ * or a markdown heading without losing the line. Exported for its own tests —
+ * getting this wrong silently eats somebody's review comment.
+ */
+export const stripComments = (text) =>
   text
     .split('\n')
     .filter((line) => !line.startsWith('#'))
@@ -70,7 +77,7 @@ async function muted(run) {
  * it again only on unmount, so without the explicit restore an editor that does
  * not assert cursor visibility itself leaves you typing blind.
  */
-export async function composeInEditor({ seed, hint, context = [], redraw }) {
+export async function composeInEditor({ seed, hint, context = [], redraw, onEmpty = 'discard' }) {
   const dir = mkdtempSync(join(tmpdir(), 'slice-'))
   const file = join(dir, 'COMMENT_EDITMSG.md')
 
@@ -81,7 +88,7 @@ export async function composeInEditor({ seed, hint, context = [], redraw }) {
   const header = [
     hint,
     '#',
-    '# Lines starting with # are ignored. Save empty to discard.',
+    `# Lines starting with # are ignored. Save empty to ${onEmpty === 'cancel' ? 'cancel' : 'discard'}.`,
     ...(context.length > 0 ? ['#', ...context.map((line) => `# ${line}`.trimEnd())] : []),
   ]
     .filter((line) => line != null)

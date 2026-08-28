@@ -16,17 +16,30 @@ import { DEFAULT_CONFIG, DEFAULT_SEVERITIES, DEFAULT_SLICE_KINDS, loadConfig, re
 /** Drawn for a severity the manifest carries no definition for. */
 const UNKNOWN_SEVERITY = { glyph: '·', color: 'gray' }
 
-export function viewerConfig({ review, cwd = process.cwd() }) {
-  let config
-  let warnings = []
-  try {
-    ;({ config, warnings } = loadConfig({ cwd }))
-  } catch (error) {
-    // A broken config file is not worth refusing to show the review over. Fall
-    // all the way back to the built-in defaults — retrying discovery could hit
-    // the same bad file again — and surface the reason in the status line.
-    config = DEFAULT_CONFIG
-    warnings = [error.message]
+export function viewerConfig({ review, cwd = process.cwd(), config: resolved = null, warnings: given = [] }) {
+  let config = resolved
+  // Anything the CLI printed before the viewer started is gone the moment the
+  // alternate screen opens, so its warnings are carried in and shown here
+  // instead — a repo trying to grant itself tools is worth actually seeing.
+  let warnings = [...given]
+
+  // The CLI has almost always resolved the config already, and it is the only
+  // one that knows about --config. Re-discovering here instead is what made
+  // `slice --config mine.jsonc` apply the review settings from that file and
+  // then silently ignore its theme.
+  if (!config) {
+    try {
+      const loaded = loadConfig({ cwd })
+      config = loaded.config
+      warnings = [...warnings, ...loaded.warnings]
+    } catch (error) {
+      // A broken config file is not worth refusing to show the review over.
+      // Fall all the way back to the built-in defaults — retrying discovery
+      // could hit the same bad file again — and surface the reason in the
+      // status line.
+      config = DEFAULT_CONFIG
+      warnings = [...warnings, error.message]
+    }
   }
 
   const severities = review.taxonomy?.severities ?? config.review.severities ?? DEFAULT_SEVERITIES
