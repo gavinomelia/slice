@@ -46,6 +46,8 @@ export const DEFAULT_SLICE_KINDS = {
 
 export const DEFAULT_CONFIG = {
   review: {
+    provider: 'claude',
+
     model: 'sonnet',
 
     effort: 'low',
