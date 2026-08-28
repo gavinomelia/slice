@@ -10,8 +10,10 @@ import { configTargets, loadConfig, mergePatch } from '../src/config/index.mjs'
 import { configTemplate } from '../src/config/template.mjs'
 
 import { splitPatch } from '../src/pipeline/patch.mjs'
-import { bareReview, mergeReview } from '../src/pipeline/merge.mjs'
+import { bareReview, mergeReview, REVIEW_REQUIRED_KEYS, REVIEW_VERSION } from '../src/pipeline/merge.mjs'
 import { analysisPrompt } from '../src/pipeline/prompt.mjs'
+import { resolveProvider } from '../src/pipeline/providers/index.mjs'
+import { extractJson, limitNotice } from '../src/pipeline/reply.mjs'
 import { runViewer } from '../src/viewer/app.mjs'
 
 const require = createRequire(import.meta.url)
@@ -40,6 +42,7 @@ Options:
   --refresh         re-run the analysis even if a cached one exists (implies --ai)
   --open <file>     open a cached review.json without touching git or the model
   --timeout <s>     give up on the analysis after this many seconds (default 600)
+  --clear-cache     delete every cached patch, analysis, and review
   -h, --help        show this
   -v, --version     print the version
 
@@ -48,10 +51,13 @@ Configuration:
   --print-config        show the resolved config and where each layer came from
   --init-config [where] write a starter config — "repo" (default) or "user"
 
-  Discovered from .slice.jsonc in the repo, then ~/.config/slice/config.jsonc.
-  The repo layer says how the code is reviewed; the user layer, how it looks.
+  Discovered from ~/.config/slice/config.jsonc, then .slice.jsonc in the repo.
+  The repo layer says how the code is reviewed; yours says how it looks, and is
+  the only one that may choose the provider, the model, or the tools the
+  analysis is given.
 
-Requires the GitHub CLI (gh) and Claude Code (claude) on your PATH.
+Requires the GitHub CLI (gh) on your PATH. --ai also needs its provider —
+Claude Code (claude), which is the only one today.
 `
 
 function fail(message) {
@@ -98,8 +104,27 @@ function parseArgs(argv) {
     config: null,
     printConfig: false,
     initConfig: null,
+    clearCache: false,
   }
-  for (let i = 0; i < argv.length; i++) {
+
+  let i = 0
+
+  /**
+   * The value after a flag that needs one.
+   *
+   * Reading `argv[++i]` unguarded is worse than it looks: a bare `--open`
+   * silently becomes `undefined`, which is falsy, so the flag is dropped and
+   * the CLI cheerfully reviews the current branch instead of telling you the
+   * argument went missing. Anything starting with `-` is the same slip one
+   * word later — `slice --open --ai` meant two flags, not a file named --ai.
+   */
+  const value = (flag, { allowDashes = false } = {}) => {
+    const next = argv[++i]
+    if (next === undefined || (!allowDashes && next.startsWith('-'))) fail(`${flag} needs a value`)
+    return next
+  }
+
+  for (; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '-h' || arg === '--help') {
       console.log(USAGE.trim())
@@ -107,9 +132,10 @@ function parseArgs(argv) {
     } else if (arg === '-v' || arg === '--version') {
       console.log(VERSION)
       process.exit(0)
-    } else if (arg === '--open') options.open = argv[++i]
-    else if (arg === '--config') options.config = argv[++i]
+    } else if (arg === '--open') options.open = value('--open')
+    else if (arg === '--config') options.config = value('--config')
     else if (arg === '--print-config') options.printConfig = true
+    else if (arg === '--clear-cache') options.clearCache = true
     else if (arg === '--init-config') {
       // The scope is optional, so only consume the next argument when it is
       // one — otherwise `--init-config 1679` would eat the PR number.
@@ -118,6 +144,9 @@ function parseArgs(argv) {
     else if (arg === '--refresh') options.refresh = true
     else if (arg === '-a' || arg === '--ai') options.analyze = true
     else if (arg === '-p' || arg === '--prompt') {
+      // Not routed through `value()`: an instruction is prose, so it may start
+      // with a dash, and the message below earns its keep by showing the shape
+      // of the thing that is missing.
       const text = argv[++i]
       // A bare -p is a plausible slip, and the silent version of it — an empty
       // instruction appended to the prompt — is indistinguishable from the
@@ -127,9 +156,19 @@ function parseArgs(argv) {
       // them, so a shell alias can carry a standing rule and the call still
       // gets to say something of its own.
       options.prompt = options.prompt ? `${options.prompt}\n${text.trim()}` : text.trim()
-    } else if (arg === '--base') options.base = argv[++i]
-    else if (arg === '--timeout') options.timeout = Number(argv[++i]) || 600
-    else if (arg.startsWith('-')) fail(`unknown option "${arg}"\n${USAGE}`)
+    } else if (arg === '--base') options.base = value('--base')
+    else if (arg === '--timeout') {
+      // Dashes allowed through so the numeric check below owns the message: a
+      // negative timeout deserves "needs a positive number", not "needs a value".
+      const raw = value('--timeout', { allowDashes: true })
+      const seconds = Number(raw)
+      // `Number(x) || 600` quietly turned both "abc" and "0" into the default,
+      // so a mistyped timeout looked like it had been accepted.
+      if (!Number.isFinite(seconds) || seconds <= 0) {
+        fail(`--timeout needs a positive number of seconds (got "${raw}")`)
+      }
+      options.timeout = seconds
+    } else if (arg.startsWith('-')) fail(`unknown option "${arg}"\n${USAGE}`)
     else if (options.ref !== null) fail(`only one PR number or branch at a time (got "${options.ref}" and "${arg}")`)
     // A bare argument is a PR number or a branch name. Which one it is is not
     // decided here: `gh pr view` accepts either, so the distinction only
@@ -251,46 +290,6 @@ function orderByCommit(files, order) {
     .map(({ file }) => file)
 }
 
-function extractJson(text) {
-  const objects = []
-
-  for (let i = 0; i < text.length; i++) {
-    if (text[i] !== '{') continue
-
-    let depth = 0
-    let inString = false
-    let escaped = false
-
-    for (let j = i; j < text.length; j++) {
-      const char = text[j]
-      if (escaped) escaped = false
-      else if (char === '\\') escaped = true
-      else if (char === '"') inString = !inString
-      else if (inString) continue
-      else if (char === '{') depth++
-      else if (char === '}' && --depth === 0) {
-        try {
-          objects.push(JSON.parse(text.slice(i, j + 1)))
-        } catch {
-          // Not JSON, or truncated mid-reply; keep looking.
-        }
-        i = j
-        break
-      }
-    }
-  }
-
-  return objects.find((object) => object?.slices) ?? objects[0] ?? null
-}
-
-function limitNotice(...texts) {
-  for (const text of texts) {
-    const match = text?.match(/[^\n]*\b(?:hit your|usage|rate|session|weekly|quota)\b[^\n]*\blimit\b[^\n]*/i)
-    if (match) return match[0].trim()
-  }
-  return null
-}
-
 function conventionSources(repoRoot, configured) {
   if (Array.isArray(configured)) {
     const missing = configured.filter((path) => !existsSync(join(repoRoot, path)))
@@ -314,38 +313,36 @@ function conventionSources(repoRoot, configured) {
   return found
 }
 
-function runAnalysis({ repoRoot, target, patchPath, filesPath, rawPath, timeoutMs, conventionFiles, config }) {
+function runAnalysis({
+  repoRoot,
+  target,
+  patchPath,
+  filesPath,
+  rawPath,
+  timeoutMs,
+  conventionFiles,
+  config,
+  provider,
+}) {
   const prompt = analysisPrompt({ patchPath, filesPath, target, repoRoot, conventionFiles, config })
 
   const startedAt = Date.now()
-  const ticker = setInterval(() => {
-    process.stderr.write(`\r  analyzing — reading the repo… ${Math.round((Date.now() - startedAt) / 1000)}s`)
-  }, 1000)
 
-  const allowedTools = config.review.allowedTools ?? []
-  const usesMcp = allowedTools.some((tool) => tool.startsWith('mcp__'))
+  // A \r-redrawn counter is for a person watching it. Sent to a pipe or a log
+  // file it is one junk line per second, so a non-tty gets a single line
+  // instead and still knows something long-running has started.
+  const live = process.stderr.isTTY
+  if (!live) console.error('  analyzing — reading the repo…')
+  const ticker = live
+    ? setInterval(() => {
+        process.stderr.write(`\r  analyzing — reading the repo… ${Math.round((Date.now() - startedAt) / 1000)}s`)
+      }, 1000)
+    : null
 
-  const builtinTools = allowedTools.filter((tool) => !tool.startsWith('mcp__'))
-
-  const child = spawn(
-    'claude',
-    [
-      '-p',
-      prompt,
-      '--output-format',
-      'json',
-      ...(config.review.model ? ['--model', config.review.model] : []),
-      ...(config.review.effort ? ['--effort', config.review.effort] : []),
-      // An empty string is how --tools spells "nothing at all", so a config
-      // that grants no tools is honoured rather than quietly granting every
-      // one of them.
-      '--tools',
-      builtinTools.join(','),
-      ...(allowedTools.length ? ['--allowed-tools', ...allowedTools] : []),
-      ...(usesMcp ? [] : ['--strict-mcp-config']),
-    ],
-    { cwd: repoRoot, stdio: ['ignore', 'pipe', 'pipe'] },
-  )
+  const child = spawn(provider.command, provider.buildArgs({ prompt, review: config.review }), {
+    cwd: repoRoot,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
 
   let stdout = ''
   let stderr = ''
@@ -354,9 +351,9 @@ function runAnalysis({ repoRoot, target, patchPath, filesPath, rawPath, timeoutM
 
   return new Promise((done) => {
     const finish = (value, message) => {
-      clearInterval(ticker)
+      if (ticker) clearInterval(ticker)
       clearTimeout(timer)
-      process.stderr.write(`\r${' '.repeat(56)}\r`)
+      if (live) process.stderr.write(`\r${' '.repeat(56)}\r`)
       const elapsed = `${Math.round((Date.now() - startedAt) / 1000)}s`
       if (message) console.error(`  analysis failed after ${elapsed}: ${message}`)
       else console.log(`  analysis finished in ${elapsed}`)
@@ -368,15 +365,10 @@ function runAnalysis({ repoRoot, target, patchPath, filesPath, rawPath, timeoutM
       finish(null, `analysis timed out after ${Math.round(timeoutMs / 1000)}s`)
     }, timeoutMs)
 
-    child.on('error', (error) => finish(null, `claude failed to start: ${error.message}`))
+    child.on('error', (error) => finish(null, `${provider.command} failed to start: ${error.message}`))
 
     child.on('close', (code) => {
-      let envelope = null
-      try {
-        envelope = JSON.parse(stdout)
-      } catch {
-      }
-      const reply = typeof envelope?.result === 'string' ? envelope.result : stdout
+      const reply = provider.extractReply(stdout)
 
       const payload = extractJson(reply) ?? extractJson(stdout)
       if (payload?.slices) return finish(payload, null)
@@ -390,9 +382,9 @@ function runAnalysis({ repoRoot, target, patchPath, filesPath, rawPath, timeoutM
       }
 
       const reason = limit
-        ? `claude hit a usage limit — ${limit}`
+        ? `${provider.name} hit a usage limit — ${limit}`
         : code !== 0
-          ? `claude exited with code ${code}${stderr.trim() ? `: ${stderr.trim().split('\n')[0]}` : ''}`
+          ? `${provider.command} exited with code ${code}${stderr.trim() ? `: ${stderr.trim().split('\n')[0]}` : ''}`
           : payload
             ? 'the analysis reply was JSON but had no "slices" key'
             : 'the analysis reply was not in the expected shape'
@@ -407,25 +399,78 @@ function initConfig(scope, repoRoot) {
   if (existsSync(path)) fail(`${path} already exists — edit it, or delete it first`)
   mkdirSync(dirname(path), { recursive: true })
   writeFileSync(path, configTemplate(scope))
-  console.log(`\n  wrote ${path}\n\n  Everything in it is commented out; uncomment what you want to change.\n`)
+  console.log(`\n  wrote ${path}\n\n  The settings in it are commented out; uncomment what you want to change.\n`)
 }
 
 function printConfig({ config, sources }) {
-  console.log(`\n  ${sources.length ? sources.join('\n  ') : 'no config files found — these are the built-in defaults'}\n`)
+  console.log(
+    `\n  ${sources.length ? sources.join('\n  ') : 'no config files found — these are the built-in defaults'}\n`,
+  )
   console.log(JSON.stringify(config, null, 2))
+}
+
+/** Everything slice caches lives under one directory, so it can all be dropped at once. */
+const cacheHome = () => join(process.env.XDG_CACHE_HOME || join(homedir(), '.cache'), 'slice')
+
+function clearCache() {
+  const root = cacheHome()
+  if (!existsSync(root)) return console.log(`\n  nothing cached at ${root}\n`)
+  const repos = readdirSync(root).length
+  rmSync(root, { recursive: true, force: true })
+  console.log(`\n  removed ${root} (${repos} repo(s))\n`)
+}
+
+/**
+ * Read a review.json, checking it is one before the viewer is handed it.
+ *
+ * `--open` takes a path from a person, and the failure modes are a stale file
+ * from an older format and a path typed one directory off. Both used to end in
+ * a stack trace from somewhere inside a render, which says nothing about
+ * either.
+ */
+function readReview(path) {
+  let parsed
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8'))
+  } catch (error) {
+    fail(`${path} is not valid JSON: ${error.message}`)
+  }
+
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    fail(`${path} does not look like a slice review`)
+  }
+  if (parsed.version !== REVIEW_VERSION) {
+    fail(
+      `${path} is review format ${parsed.version ?? 'unknown'}, and this build of slice reads ${REVIEW_VERSION} — re-run the review to regenerate it`,
+    )
+  }
+  const missing = REVIEW_REQUIRED_KEYS.filter((key) => !(key in parsed))
+  if (missing.length > 0) fail(`${path} is missing ${missing.join(', ')} — it does not look like a slice review`)
+
+  return parsed
 }
 
 async function main() {
   const options = parseArgs(process.argv.slice(2))
 
-  const repoRoot = tryRun('git', ['rev-parse', '--show-toplevel'])
-  if (!repoRoot) fail('not inside a git repository')
+  if (options.clearCache) return clearCache()
 
-  if (options.initConfig) return initConfig(options.initConfig, repoRoot)
+  // Only the modes that read git need a repo. `--open` was documented as
+  // touching neither git nor gh and then refused to run outside a checkout,
+  // and `--init-config user` writes to your home directory either way.
+  const repoRoot = tryRun('git', ['rev-parse', '--show-toplevel'])
+  const cwd = repoRoot ?? process.cwd()
+
+  if (options.initConfig) {
+    if (options.initConfig === 'repo' && !repoRoot) {
+      fail('not inside a git repository — run this from a repo, or use `slice --init-config user`')
+    }
+    return initConfig(options.initConfig, cwd)
+  }
 
   let loaded
   try {
-    loaded = loadConfig({ cwd: repoRoot, explicit: options.config })
+    loaded = loadConfig({ cwd, explicit: options.config })
   } catch (error) {
     fail(error.message)
   }
@@ -443,14 +488,20 @@ async function main() {
   if (options.open) {
     if (!existsSync(options.open)) fail(`no such review file: ${options.open}`)
     return runViewer({
-      review: JSON.parse(readFileSync(options.open, 'utf8')),
+      review: readReview(options.open),
       reviewPath: options.open,
-      repoRoot,
+      repoRoot: cwd,
+      config,
+      warnings: configWarnings,
     })
   }
 
+  if (!repoRoot) fail('not inside a git repository')
+
   const asBranch = () => resolveBranchTarget(repoRoot, options.base, options.branch ? options.ref : null)
-  const target = options.branch ? asBranch() : (resolvePrTarget(repoRoot, options.ref) ?? resolveBranchTarget(repoRoot, options.base, options.ref))
+  const target = options.branch
+    ? asBranch()
+    : (resolvePrTarget(repoRoot, options.ref) ?? resolveBranchTarget(repoRoot, options.base, options.ref))
 
   if (!target) {
     const why = ghDiagnosis(repoRoot)
@@ -478,7 +529,7 @@ async function main() {
 
   const slug = (target.repo || repoRoot.split('/').pop()).replace(/[^a-zA-Z0-9]+/g, '-')
   const id = target.kind === 'pr' ? `pr-${target.number}` : `branch-${target.headRef.replace(/[^a-zA-Z0-9]+/g, '-')}`
-  const cacheDir = join(homedir(), '.cache', 'slice', slug)
+  const cacheDir = join(cacheHome(), slug)
   mkdirSync(cacheDir, { recursive: true })
 
   const tag = options.prompt ? `-${createHash('sha256').update(options.prompt).digest('hex').slice(0, 8)}` : ''
@@ -523,8 +574,18 @@ async function main() {
     }
 
     if (!analysis) {
-      if (!tryRun('claude', ['--version'])) {
-        fail('Claude Code is not installed — see https://claude.com/claude-code, or pass --no-analyze')
+      // Resolved here rather than at startup: a provider that slice does not
+      // have only matters once something is actually going to be run, and a
+      // config typo should not stop you reading a diff.
+      let provider
+      try {
+        provider = resolveProvider(config.review.provider)
+      } catch (error) {
+        fail(error.message)
+      }
+
+      if (!tryRun(provider.command, provider.versionArgs)) {
+        fail(`${provider.name} is not installed — see ${provider.docsUrl}, or drop --ai to just read the diff`)
       }
 
       const conventionFiles = conventionSources(repoRoot, config.review.conventionFiles)
@@ -546,6 +607,7 @@ async function main() {
         timeoutMs: options.timeout * 1000,
         conventionFiles,
         config,
+        provider,
       })
     }
 
@@ -573,7 +635,10 @@ async function main() {
   const slices = review.slices.length
   console.log(`\n  ${slices} slice(s), ${findings} finding(s)\n`)
 
-  await runViewer({ review, reviewPath, repoRoot })
+  await runViewer({ review, reviewPath, repoRoot, config, warnings: configWarnings })
 }
 
-main().catch((error) => fail(error.stack ?? error.message))
+// A stack trace is for whoever is fixing slice, not for whoever is using it.
+main().catch((error) =>
+  fail(process.env.SLICE_DEBUG ? (error.stack ?? error.message) : (error.message ?? String(error))),
+)

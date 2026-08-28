@@ -10,8 +10,8 @@
  */
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { homedir, tmpdir } from 'node:os'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { after, test } from 'node:test'
@@ -31,9 +31,36 @@ git('add', '-A')
 git('commit', '-q', '-m', 'Add A')
 git('checkout', '-q', 'main')
 
-after(() => rmSync(repo, { recursive: true, force: true }))
+/**
+ * Cache and config are redirected into the throwaway tree.
+ *
+ * Without this the suite reads whichever ~/.config/slice/config.jsonc the
+ * person running it happens to have — so a developer with a house rule in
+ * theirs sees different results from CI — and writes review artifacts into
+ * their real ~/.cache.
+ */
+// Beside the repo, never inside it — cache files under the working tree would
+// show up in the very diffs these tests assert on.
+const home = mkdtempSync(join(tmpdir(), 'slice-cli-home-'))
+const xdg = { XDG_CACHE_HOME: join(home, 'cache'), XDG_CONFIG_HOME: join(home, 'config') }
 
-const slice = (...args) => spawnSync(process.execPath, [BIN, ...args], { cwd: repo, encoding: 'utf8' })
+after(() => {
+  rmSync(repo, { recursive: true, force: true })
+  rmSync(home, { recursive: true, force: true })
+})
+
+const slice = (...args) =>
+  spawnSync(process.execPath, [BIN, ...args], {
+    cwd: repo,
+    encoding: 'utf8',
+    env: { ...process.env, ...xdg, SLICE_CONFIG: '' },
+  })
+
+const slug = repo
+  .split('/')
+  .pop()
+  .replace(/[^a-zA-Z0-9]+/g, '-')
+const cachedReview = (name) => join(xdg.XDG_CACHE_HOME, 'slice', slug, name)
 
 test('--version prints just the version', () => {
   const { status, stdout } = slice('--version')
@@ -68,7 +95,15 @@ test('-p lands in review.instructions, and adds to what the config already said'
   const configPath = join(mkdtempSync(join(tmpdir(), 'slice-prompt-')), 'config.jsonc')
   writeFileSync(configPath, '{ "review": { "instructions": "Ignore vendor." } }')
 
-  const { status, stdout } = slice('--config', configPath, '--print-config', '-p', 'Group by file type.', '-p', 'Security.')
+  const { status, stdout } = slice(
+    '--config',
+    configPath,
+    '--print-config',
+    '-p',
+    'Group by file type.',
+    '-p',
+    'Security.',
+  )
   assert.equal(status, 0)
 
   const { review } = JSON.parse(stdout.slice(stdout.indexOf('{')))
@@ -115,9 +150,7 @@ test('with no AI analysis, files are ordered by when they were first committed, 
   const { status, stderr } = slice('order-branch', '--branch')
   assert.equal(status, 0, stderr)
 
-  const slug = repo.split('/').pop().replace(/[^a-zA-Z0-9]+/g, '-')
-  const reviewPath = join(homedir(), '.cache', 'slice', slug, 'branch-order-branch.review.json')
-  const review = JSON.parse(readFileSync(reviewPath, 'utf8'))
+  const review = JSON.parse(readFileSync(cachedReview('branch-order-branch.review.json'), 'utf8'))
   assert.deepEqual(review.slices[0].paths, ['z.rb', 'a.rb'])
 })
 
@@ -155,4 +188,84 @@ test('--init-config does not swallow a following positional', () => {
   const { stderr, status } = slice('--init-config', 'no-such-branch')
   assert.equal(status, 1, stderr)
   assert.match(stderr, /already exists|no pull request/)
+})
+
+test('a flag that needs a value says so instead of silently dropping itself', () => {
+  // A bare --open used to become undefined, which is falsy, so the flag was
+  // ignored and the current branch got reviewed instead.
+  for (const flag of ['--open', '--config', '--base']) {
+    const { status, stderr } = slice(flag)
+    assert.equal(status, 1, `${flag} exits non-zero`)
+    assert.match(stderr, new RegExp(`\\${flag} needs a value`))
+  }
+})
+
+test('a flag swallowing the next flag is caught too', () => {
+  const { status, stderr } = slice('--open', '--ai')
+  assert.equal(status, 1)
+  assert.match(stderr, /--open needs a value/)
+})
+
+test('--timeout rejects what it cannot use rather than defaulting silently', () => {
+  for (const bad of ['abc', '0', '-5']) {
+    const { status, stderr } = slice('--timeout', bad)
+    assert.equal(status, 1, `--timeout ${bad} exits non-zero`)
+    assert.match(stderr, /--timeout needs a positive number/)
+  }
+})
+
+test('--open refuses a file that is not a review, and says which way it is wrong', () => {
+  const bad = join(home, 'bad.json')
+
+  writeFileSync(bad, 'not json at all')
+  assert.match(slice('--open', bad).stderr, /not valid JSON/)
+
+  writeFileSync(bad, JSON.stringify({ version: 99, target: {}, files: {}, slices: [], findings: [], overview: {} }))
+  assert.match(slice('--open', bad).stderr, /review format 99/)
+
+  writeFileSync(bad, JSON.stringify({ version: 1 }))
+  assert.match(slice('--open', bad).stderr, /missing target/)
+})
+
+test('--open works outside a git repository, as documented', () => {
+  const { status, stdout } = slice('--branch', 'feature-branch')
+  assert.equal(status, 0)
+
+  const reviewPath = cachedReview('branch-feature-branch.review.json')
+  assert.ok(stdout.length > 0)
+
+  // Run it from somewhere that is definitely not a checkout.
+  const outside = spawnSync(process.execPath, [BIN, '--open', reviewPath], {
+    cwd: home,
+    encoding: 'utf8',
+    env: { ...process.env, ...xdg, SLICE_CONFIG: '' },
+  })
+  assert.equal(outside.status, 0, outside.stderr)
+  // Not a tty under the test runner, so the viewer declines to draw and says
+  // where the review is instead — which is the non-interactive contract.
+  assert.match(outside.stderr, /not a terminal/)
+})
+
+test('a repo config cannot hand the analysis new tools, and the CLI says so', () => {
+  writeFileSync(join(repo, '.slice.jsonc'), JSON.stringify({ review: { allowedTools: ['Bash'] } }))
+  try {
+    const { stdout, stderr } = slice('--print-config')
+    assert.match(stderr, /ignoring "review\.allowedTools"/)
+    const config = JSON.parse(stdout.slice(stdout.indexOf('{')))
+    assert.deepEqual(config.review.allowedTools, ['Read', 'Grep', 'Glob'])
+  } finally {
+    rmSync(join(repo, '.slice.jsonc'), { force: true })
+  }
+})
+
+test('--clear-cache removes the cache and is honest when there is none', () => {
+  slice('--branch', 'feature-branch')
+  assert.ok(existsSync(cachedReview('branch-feature-branch.review.json')))
+
+  const first = slice('--clear-cache')
+  assert.equal(first.status, 0)
+  assert.match(first.stdout, /removed/)
+  assert.equal(existsSync(cachedReview('branch-feature-branch.review.json')), false)
+
+  assert.match(slice('--clear-cache').stdout, /nothing cached/)
 })

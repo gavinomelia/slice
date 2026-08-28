@@ -1,5 +1,16 @@
 import { DEFAULT_CONFIG, severityNames, sliceKindNames } from '../config/index.mjs'
 
+/**
+ * The shape of `review.json`, which is the contract between the pipeline and
+ * the viewer — and the reason `--open` works at all. Bump it when a change
+ * would make an older file render wrongly rather than merely incompletely, so
+ * `--open` can refuse instead of failing somewhere deep in a render.
+ */
+export const REVIEW_VERSION = 1
+
+/** The keys a file must have before the viewer will be handed it. */
+export const REVIEW_REQUIRED_KEYS = ['target', 'files', 'slices', 'findings', 'overview']
+
 const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/
 
 /**
@@ -144,7 +155,8 @@ export function mergeReview({ target, files, analysis, config = DEFAULT_CONFIG }
       line = null
     }
 
-    const endLine = Number.isInteger(finding.endLine) && line !== null && finding.endLine > line ? finding.endLine : null
+    const endLine =
+      Number.isInteger(finding.endLine) && line !== null && finding.endLine > line ? finding.endLine : null
 
     findings.push({
       id: `f${index + 1}`,
@@ -161,7 +173,7 @@ export function mergeReview({ target, files, analysis, config = DEFAULT_CONFIG }
   }
 
   const review = {
-    version: 1,
+    version: REVIEW_VERSION,
     generatedAt: new Date().toISOString(),
     target,
     // Carried into the manifest so a viewer draws the taxonomy this review was
@@ -186,7 +198,7 @@ export function mergeReview({ target, files, analysis, config = DEFAULT_CONFIG }
 /** A viewer-only manifest for when analysis is skipped or failed. */
 export function bareReview({ target, files, config = DEFAULT_CONFIG }) {
   return {
-    version: 1,
+    version: REVIEW_VERSION,
     generatedAt: new Date().toISOString(),
     target,
     taxonomy: { severities: config.review.severities, sliceKinds: config.review.sliceKinds },
