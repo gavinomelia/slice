@@ -41,9 +41,24 @@ const dark = {
     borderFocus: 'cyan',
     cursor: 'cyan',
     draft: 'green',
+    reviewed: 'green',
     heading: 'gray',
     scrollTrack: 'gray',
     scrollThumb: 'gray',
+  },
+
+  /**
+   * What happened to a file, shown in the tree. Modified gets no glyph on
+   * purpose: it is nearly every row, and marking it would drown the handful
+   * that are worth noticing. The add/delete colours are the diff's own, so a
+   * new file reads as new in both places.
+   */
+  fileStatus: {
+    added: { glyph: '+', color: '#3fb950' },
+    deleted: { glyph: '-', color: '#f85149' },
+    renamed: { glyph: '→', color: 'cyan' },
+    binary: { glyph: '◆', color: 'gray' },
+    modified: { glyph: ' ', color: null },
   },
 
   risk: { low: 'green', medium: 'yellow', high: 'red' },
@@ -85,9 +100,18 @@ const light = {
     borderFocus: 'blue',
     cursor: 'blue',
     draft: 'green',
+    reviewed: 'green',
     heading: 'gray',
     scrollTrack: 'gray',
     scrollThumb: 'gray',
+  },
+
+  fileStatus: {
+    added: { glyph: '+', color: '#1a7f37' },
+    deleted: { glyph: '-', color: '#cf222e' },
+    renamed: { glyph: '→', color: 'blue' },
+    binary: { glyph: '◆', color: 'gray' },
+    modified: { glyph: ' ', color: null },
   },
 
   risk: { low: 'green', medium: 'yellow', high: 'red' },

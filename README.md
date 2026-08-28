@@ -151,6 +151,7 @@ line cursor, or the findings pane's scroll.
 | `z` | zoom the diff to the full terminal |
 | `[` `]` | previous / next slice |
 | `n` `p` | next / previous finding, anywhere in the review |
+| `x` | mark the selected file — or whole slice — read, and move on |
 | `c` | comment on the diff's cursor line |
 | `s` `A` `R` | submit as comment / approve / request changes |
 | `q` `ctrl-c` | quit |
@@ -174,6 +175,30 @@ cursor regardless.
 Selecting a slice shows its card: the walkthrough, its files, and every
 finding it covers, instead of a diff. The tree's last row is the draft
 review: what is staged and what will happen to it on submit.
+
+## Keeping your place
+
+The tree says what happened to each file — `+` added, `-` deleted, `→`
+renamed, `◆` binary. Modified files get no glyph, because they are nearly
+every row and marking them would bury the few worth noticing.
+
+`x` marks the selected file read and moves to the next one that is not, so a
+review is one repeated keystroke and files you have already done are stepped
+over rather than visited again. On a slice header it marks every file in the
+slice. A read file gets a `✓` in the tree's left margin and its name recedes;
+its findings do not, because a file you have already looked at can still be
+the one with the bug. A slice header shows a `✓` in place of its `·` once
+every file under it is read.
+
+Pressing `x` on something already read unmarks it and stays put — undoing
+something and then being moved away from it is how you lose track of what you
+just undid. A part-read slice marks the rest rather than clearing what is
+done, so unmarking a whole slice takes two presses.
+
+Read state persists between sessions, beside the review in the cache. It is
+stored against a digest of each file's diff, so pushing a fix to a PR and
+re-opening it brings that file back unread rather than claiming you have seen
+a change that did not exist yet. Nothing else in the review is disturbed.
 
 ## Commenting and posting back to GitHub
 
@@ -335,7 +360,8 @@ which is the hole the trust boundary above exists to close.
     "preset": "dark",          // or "light", or just "theme": "light"
     "syntax": "tokyo-night",   // any Shiki theme, plus pierre-dark / pierre-light
     "ui": { "accent": "magenta", "borderFocus": "magenta" },
-    "diff": { "addBg": "#0b2c18", "delBg": "#3a1114" }
+    "diff": { "addBg": "#0b2c18", "delBg": "#3a1114" },
+    "fileStatus": { "renamed": { "glyph": "»", "color": "magenta" } }
   },
   "layout": {
     "diffView": "unified",   // or "split", which one a diff opens in; v switches
@@ -348,6 +374,11 @@ Colors are terminal palette names or hex. Palette names follow your
 terminal theme; hex does not. Both downsample automatically where
 truecolor is missing.
 
+`fileStatus` is the glyph and colour each file's fate gets in the tree —
+`added`, `deleted`, `renamed`, `binary`, `modified` — so a terminal font
+without `→` can say something else. It is merged key by key, so naming one
+status leaves the other four alone.
+
 ## Caching
 
 Artifacts are cached in `$XDG_CACHE_HOME/slice/<repo>/`, or
@@ -357,7 +388,11 @@ redo the analysis; plain `--ai` reuses a cached one if there is one. A run
 with `-p` gets its own entry, keyed by a hash of the instructions, so it
 neither reads nor overwrites the plain review of the same diff.
 
-`slice --clear-cache` drops the whole thing.
+Your unposted drafts and your read marks live there too, keyed to the same
+review, which is what lets both survive closing the terminal.
+
+`slice --clear-cache` drops the whole thing, read marks and unposted drafts
+included.
 
 Re-open a cached review without touching git, `gh`, or the model:
 
@@ -382,6 +417,7 @@ src/viewer/             the terminal UI (ink)
   render.mjs            @pierre/diffs hast -> styled segments
   markdown.mjs          markdown -> styled, pre-wrapped line segments
   compose.mjs           $EDITOR composition and draft persistence
+  progress.mjs          which files are marked read, and what invalidates that
   github.mjs            posting a review back
   theme.mjs             config + manifest -> what the viewer draws with
 src/config/             defaults, presets, and the JSONC loader

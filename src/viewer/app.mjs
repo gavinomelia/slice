@@ -27,6 +27,7 @@ import {
 import { composeInEditor, loadDrafts, saveDrafts, seedFromFinding } from './compose.mjs'
 import { partitionDrafts, postReview } from './github.mjs'
 import { buildTree, cellAt, draftKey, rowHasLine, sideAt, windowFor } from './tree.mjs'
+import { loadReviewed, nextUnreviewed, pathsForRow, saveReviewed, sliceReviewed, toggleReviewed } from './progress.mjs'
 import { viewerConfig } from './theme.mjs'
 
 const PANES = ['tree', 'diff', 'findings']
@@ -94,7 +95,7 @@ function draftsCard(review, drafts, width, ui) {
 }
 
 /** The card shown in the centre pane when a slice header is selected. */
-function sliceCard(review, slice, width, ui) {
+function sliceCard(review, slice, reviewed, width, ui) {
   const kind = ui.sliceKind(slice.kind)
   const lines = [
     ...wrapSegments(parseInline(slice.title, { bold: true }), width),
@@ -107,9 +108,18 @@ function sliceCard(review, slice, width, ui) {
     [],
     plain('FILES', { color: ui.theme.ui.heading, bold: true }),
   ]
+  // The slice's triage list, so read state belongs here too — this is the one
+  // place that shows full paths, and what is left to do in a slice is exactly
+  // what you came to the card for.
   for (const path of slice.paths) {
     const findings = findingsFor(review, path)
-    lines.push([{ text: `  ${path}` }, ...(findings.length ? [{ text: '  ' }, ...severityGlyphs(findings, ui)] : [])])
+    const status = ui.fileStatus(review.files[path]?.status)
+    lines.push([
+      { text: reviewed.has(path) ? '✓ ' : '  ', color: ui.theme.ui.reviewed },
+      { text: `${status.glyph} `, color: status.color },
+      { text: path, dim: reviewed.has(path) },
+      ...(findings.length ? [{ text: '  ' }, ...severityGlyphs(findings, ui)] : []),
+    ])
   }
   return lines
 }
@@ -300,6 +310,7 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
   const [rows, setRows] = useState([])
   const [loading, setLoading] = useState(false)
   const [drafts, setDrafts] = useState(() => loadDrafts(reviewPath))
+  const [reviewed, setReviewed] = useState(() => loadReviewed(reviewPath, initialReview))
   const [status, setStatus] = useState(() =>
     // Longer than the default: this one is on screen before you are looking at
     // it, and it is the only report of what the analysis got wrong.
@@ -493,10 +504,10 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
 
   const centre = useMemo(() => {
     if (current?.type === 'overview') return overviewCard(review, inner(diffWidth), ui)
-    if (current?.type === 'slice') return sliceCard(review, slice, inner(diffWidth), ui)
+    if (current?.type === 'slice') return sliceCard(review, slice, reviewed, inner(diffWidth), ui)
     if (current?.type === 'drafts') return draftsCard(review, drafts, inner(diffWidth), ui)
     return null
-  }, [review, current, slice, drafts, diffWidth, ui])
+  }, [review, current, slice, drafts, reviewed, diffWidth, ui])
 
   const draftAt = useMemo(() => {
     const index = new Map()
@@ -507,6 +518,35 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
   const persist = (next) => {
     setDrafts(next)
     saveDrafts(reviewPath, next)
+  }
+
+  /**
+   * Mark the selected file — or every file in the selected slice — as read,
+   * and move on to the next thing that is not.
+   *
+   * Advancing is what makes this the "done, next" key rather than a checkbox:
+   * a review becomes one repeated keystroke, and files you already marked are
+   * stepped over instead of visited again. Unmarking stays put, because
+   * undoing something and then being moved away from it is how you lose track
+   * of what you just undid.
+   */
+  const toggleRead = () => {
+    const paths = pathsForRow(current, review)
+    if (paths.length === 0) {
+      return setStatus({ tone: theme.risk.medium, text: 'Only a file or a slice can be marked read.' })
+    }
+
+    const next = toggleReviewed(reviewed, paths)
+    setReviewed(next)
+    saveReviewed(reviewPath, next, review)
+
+    if (next.size < reviewed.size) {
+      return setStatus({ tone: theme.ui.muted, text: `Marked unread: ${paths.length === 1 ? paths[0] : 'the slice'}.` })
+    }
+
+    const at = nextUnreviewed(tree, treeIndex, next)
+    if (at >= 0) return setTreeIndex(at)
+    setStatus({ tone: theme.ui.reviewed, text: 'Every file in this review is marked read.' })
   }
 
   /** Write or edit the draft on the cursor's line; an empty body deletes it. */
@@ -707,6 +747,9 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
     if (input === 'q' || (key.ctrl && input === 'c')) return exit()
 
     if (input === 'c') return void commentOnCursor().catch((e) => setStatus({ tone: theme.risk.high, text: e.message }))
+    // Bound regardless of which pane has focus: it acts on what the tree has
+    // selected, which is the same thing panes 2 and 3 are already showing.
+    if (input === 'x') return toggleRead()
     if (input === 's' || input === 'A' || input === 'R') {
       const event = input === 'A' ? 'APPROVE' : input === 'R' ? 'REQUEST_CHANGES' : 'COMMENT'
       return void submit(event).catch((e) => setStatus({ tone: theme.risk.high, text: e.message }))
@@ -791,6 +834,7 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
               hOffset > 0 ? `→${hOffset}` : '',
               split ? 'split' : '',
               zoomed ? 'zoom' : '',
+              reviewed.has(path) ? 'read' : '',
             ]
               .filter(Boolean)
               .join('  ')
@@ -905,11 +949,11 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
   // not. Split spends its spare room teaching H/L, since two columns are the
   // only place a side to choose exists.
   const KEYS = {
-    tree: '[j/k] move  [[/]] slice  [tab] pane  [n/p] finding  [q] quit',
+    tree: '[j/k] move  [[/]] slice  [x] read  [tab] pane  [n/p] finding  [q] quit',
     diff: split
-      ? '[j/k] line  [H/L] side  [h/l] scroll  [v] unified  [c] comment  [s/A/R] submit'
-      : '[j/k] line  [h/l] scroll  [0] reset  [v] split  [z] zoom  [c] comment  [s/A/R] submit',
-    findings: '[j/k] scroll  [n/p] finding  [c] comment  [tab] pane  [q] quit',
+      ? '[j/k] line  [H/L] side  [h/l] scroll  [v] unified  [c] comment  [x] read  [s/A/R] submit'
+      : '[j/k] line  [h/l] scroll  [v] split  [z] zoom  [c] comment  [x] read  [s/A/R] submit',
+    findings: '[j/k] scroll  [n/p] finding  [c] comment  [x] read  [tab] pane  [q] quit',
   }
 
   return h(
@@ -937,6 +981,14 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
           { color: theme.ui.muted },
           `${review.slices.length} slices · ${Object.keys(review.files).length} files · `,
         ),
+        // Only once there is progress to report. "0 read" on a review you have
+        // not started is a line of chrome that says nothing.
+        ...(reviewed.size > 0
+          ? [
+              h(Text, { key: 'read', color: theme.ui.reviewed }, `${reviewed.size} read `),
+              h(Text, { key: 'readsep', color: theme.ui.muted }, '· '),
+            ]
+          : []),
         // The severity mix, not just a total: eight findings that are all nits
         // and eight that are all bugs are different reviews.
         ...(counts.length
@@ -989,6 +1041,10 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
               }
               if (row.type === 'slice') {
                 const s = review.slices[row.sliceIndex]
+                // The separator doubles as the slice's own read mark, so a
+                // finished slice reads as done without spending a column the
+                // titles need.
+                const done = sliceReviewed(review, row.sliceIndex, reviewed)
                 return h(
                   Text,
                   {
@@ -996,16 +1052,31 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
                     bold: true,
                     color: selected ? theme.ui.accent : (ui.sliceKind(s.kind).color ?? undefined),
                   },
-                  `${row.sliceIndex + 1} · ${s.title}`,
+                  `${row.sliceIndex + 1} `,
+                  h(Text, { color: done ? theme.ui.reviewed : undefined }, done ? '✓' : '·'),
+                  ` ${s.title}`,
                 )
               }
 
               const fileFindings = findingsFor(review, row.path)
+              const read = reviewed.has(row.path)
+              const status = ui.fileStatus(review.files[row.path]?.status)
               return h(
                 Text,
                 base,
-                h(Text, { color: theme.ui.border, dimColor: true }, row.last ? ' └ ' : ' ├ '),
-                h(Text, { color: selected ? theme.ui.accent : undefined }, row.path.split('/').pop()),
+                // A leading mark column, the way the diff pane carries one for
+                // the cursor: a check has to sit where the eye can run down it,
+                // not after a filename of unpredictable length.
+                h(Text, { color: theme.ui.reviewed, bold: true }, read ? '✓' : ' '),
+                h(Text, { color: theme.ui.border, dimColor: true }, row.last ? '└ ' : '├ '),
+                h(Text, { color: status.color }, `${status.glyph} `),
+                // Read files recede, but their findings do not — a file you
+                // have already looked at can still be the one with the bug.
+                h(
+                  Text,
+                  { color: selected ? theme.ui.accent : undefined, dimColor: read && !selected },
+                  row.path.split('/').pop(),
+                ),
                 ...severityGlyphs(fileFindings, ui, 3).map((segment, j) =>
                   h(Text, { key: j, color: segment.color }, j === 0 ? ` ${segment.text}` : segment.text),
                 ),
