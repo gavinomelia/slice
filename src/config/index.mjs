@@ -6,10 +6,15 @@
  * config format that executes would let a branch you are reviewing run code
  * the moment you open it. JSONC gets the commentable config file without the
  * arbitrary execution.
+ *
+ * The same reasoning governs which layer may set what. A repo's `.slice.jsonc`
+ * arrives with the branch under review, so it is attacker-controlled input in
+ * exactly the case this tool exists for. It may say how the code should be
+ * reviewed; it may not say what the analysis is allowed to *do*.
  */
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join, resolve, sep } from 'node:path'
 
 import { DEFAULT_CONFIG } from './defaults.mjs'
 import { DEFAULT_THEME_NAME, THEMES } from './themes.mjs'
@@ -19,6 +24,24 @@ export { THEMES } from './themes.mjs'
 
 const REPO_NAMES = ['.slice.jsonc', '.slice.json']
 const USER_NAMES = ['config.jsonc', 'config.json']
+
+/**
+ * Settings that decide what the analysis may do, rather than what it should
+ * look for. Only a config you own may set these.
+ *
+ * `allowedTools` is the whole toolset handed to a non-interactive agent, so a
+ * repo that could add `Bash` or `Write` would be running code on the machine of
+ * anyone who reviewed it. `promptFile` names a file whose contents go into the
+ * prompt, which is the same hole pointed the other way — it reads. `provider`
+ * decides which program gets spawned at all; the registry means it can only
+ * ever name one slice ships, but which one is still not a branch's call.
+ * `model` and `effort` only spend your money, but they are the same kind of
+ * decision and belong on the same side of the line.
+ */
+export const PRIVILEGED_REVIEW_KEYS = ['provider', 'model', 'effort', 'allowedTools', 'promptFile']
+
+/** Settings about how the viewer draws, as opposed to how the review is made. */
+export const APPEARANCE_KEYS = ['theme', 'layout']
 
 /**
  * JSON, plus comments and trailing commas.
@@ -137,39 +160,97 @@ export const configTargets = (repoRoot) => ({
   user: join(userConfigDir(), USER_NAMES[0]),
 })
 
+const pick = (patch, keys) => Object.fromEntries(Object.entries(patch).filter(([key]) => keys.includes(key)))
+const omit = (patch, keys) => Object.fromEntries(Object.entries(patch).filter(([key]) => !keys.includes(key)))
+
+/** Does this relative path stay inside the repo once resolved? */
+function insideRepo(repoRoot, candidate) {
+  if (typeof candidate !== 'string' || isAbsolute(candidate)) return false
+  const full = resolve(repoRoot, candidate)
+  return full === repoRoot || full.startsWith(repoRoot + sep)
+}
+
+/**
+ * Strip from a repo's config everything a repo is not allowed to decide.
+ *
+ * Dropped rather than rejected: refusing to run because a repo asked for
+ * something it cannot have would let any branch break the tool for everyone
+ * reviewing it. The warning is printed, the setting is ignored, the review
+ * proceeds.
+ */
+function trustRepoConfig(patch, { path, repoRoot, warnings }) {
+  if (!isPlainObject(patch.review)) return patch
+  const review = { ...patch.review }
+  const yours = join(userConfigDir(), USER_NAMES[0])
+
+  for (const key of PRIVILEGED_REVIEW_KEYS) {
+    if (!(key in review)) continue
+    delete review[key]
+    warnings.push(
+      `${path}: ignoring "review.${key}" — a repo cannot change how the analysis is run. Set it in ${yours} if you want it.`,
+    )
+  }
+
+  if (Array.isArray(review.conventionFiles)) {
+    const kept = review.conventionFiles.filter((candidate) => insideRepo(repoRoot, candidate))
+    for (const candidate of review.conventionFiles) {
+      if (!kept.includes(candidate)) {
+        warnings.push(`${path}: ignoring convention file ${JSON.stringify(candidate)} — it points outside the repo`)
+      }
+    }
+    review.conventionFiles = kept
+  }
+
+  return { ...patch, review }
+}
+
 /**
  * Resolve the config for a repo.
  *
- * Layers, weakest first: built-in defaults, the user's file, the repo's file.
- * That ordering is the whole point — a repo states how it wants to be
- * reviewed, and a person states how they want it to look, and the repo does
- * not get to override somebody's colour scheme unless it says so explicitly.
+ * Two layers, and which one wins depends on what is being decided:
  *
- * `explicit` (from --config or $SLICE_CONFIG) replaces both discovered
- * layers rather than stacking on them, so a one-off file is exactly what you
- * get.
+ * - **How the code is reviewed** — the repo wins. A project states its own
+ *   conventions, and someone reviewing it should get them.
+ * - **How the viewer looks** — you win. A repo may suggest a theme for someone
+ *   who has no preference, but it does not get to repaint your terminal.
+ * - **What the analysis is allowed to do** — only you, ever. See
+ *   `PRIVILEGED_REVIEW_KEYS`.
+ *
+ * `explicit` (from --config or $SLICE_CONFIG) replaces both discovered layers
+ * rather than stacking on them, and is trusted in full: you named the file, so
+ * nothing in it is withheld.
  */
 export function loadConfig({ cwd = process.cwd(), explicit = null } = {}) {
   const chosen = explicit ?? process.env.SLICE_CONFIG ?? null
-  const sources = []
   const warnings = []
 
   if (chosen) {
     if (!existsSync(chosen)) throw new Error(`config file not found: ${chosen}`)
-    sources.push(chosen)
-  } else {
-    const user = firstExisting(userConfigDir(), USER_NAMES)
-    const repo = firstExisting(cwd, REPO_NAMES)
-    if (user) sources.push(user)
-    if (repo) sources.push(repo)
+    const patch = readConfigFile(chosen)
+    warnings.push(...unknownKeys(patch, chosen))
+    return { config: mergePatch(DEFAULT_CONFIG, patch), sources: [chosen], warnings }
   }
 
-  let config = DEFAULT_CONFIG
-  for (const path of sources) {
-    const patch = readConfigFile(path)
-    warnings.push(...unknownKeys(patch, path))
-    config = mergePatch(config, patch)
+  const userPath = firstExisting(userConfigDir(), USER_NAMES)
+  const repoPath = firstExisting(cwd, REPO_NAMES)
+  const sources = [userPath, repoPath].filter(Boolean)
+
+  const user = userPath ? readConfigFile(userPath) : {}
+  const repoRaw = repoPath ? readConfigFile(repoPath) : {}
+  for (const [patch, path] of [
+    [user, userPath],
+    [repoRaw, repoPath],
+  ]) {
+    if (path) warnings.push(...unknownKeys(patch, path))
   }
+
+  const repo = repoPath ? trustRepoConfig(repoRaw, { path: repoPath, repoRoot: cwd, warnings }) : {}
+
+  let config = DEFAULT_CONFIG
+  config = mergePatch(config, pick(repo, APPEARANCE_KEYS))
+  config = mergePatch(config, pick(user, APPEARANCE_KEYS))
+  config = mergePatch(config, omit(user, APPEARANCE_KEYS))
+  config = mergePatch(config, omit(repo, APPEARANCE_KEYS))
 
   return { config, sources, warnings }
 }
