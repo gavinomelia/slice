@@ -195,14 +195,23 @@ export function mergeReview({ target, files, analysis, config = DEFAULT_CONFIG }
   return { review, warnings }
 }
 
-/** A viewer-only manifest for when analysis is skipped or failed. */
-export function bareReview({ target, files, config = DEFAULT_CONFIG }) {
+/**
+ * A viewer-only manifest for when analysis is skipped, still running, or
+ * failed. `assessment` says which of those it is — the viewer's overview
+ * pane is the one place that distinction is worth spelling out.
+ */
+export function bareReview({
+  target,
+  files,
+  config = DEFAULT_CONFIG,
+  assessment = 'No analysis was run for this review.',
+}) {
   return {
     version: REVIEW_VERSION,
     generatedAt: new Date().toISOString(),
     target,
     taxonomy: { severities: config.review.severities, sliceKinds: config.review.sliceKinds },
-    overview: { intent: '', assessment: 'No analysis was run for this review.', risk: 'medium' },
+    overview: { intent: '', assessment, risk: 'medium' },
     slices: [
       {
         id: 'all-files',

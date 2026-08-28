@@ -274,10 +274,14 @@ const Lines = ({ lines, top, height }) =>
     ),
   )
 
-function App({ review, reviewPath, repoRoot, ink, ui }) {
+function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPromise }) {
   const { exit } = useApp()
   const { stdout } = useStdout()
   const { theme, layout } = ui
+
+  // Seeded from the bare diff and replaced once analysisPromise resolves, so
+  // the viewer is on screen before the analysis has said anything at all.
+  const [review, setReview] = useState(initialReview)
 
   const [size, setSize] = useState({ cols: stdout.columns || 120, rows: stdout.rows || 40 })
   useEffect(() => {
@@ -324,6 +328,51 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
     const timer = setTimeout(() => setStatus(null), status.ms ?? 2500)
     return () => clearTimeout(timer)
   }, [status])
+
+  // While analysisPromise is outstanding, a persistent counter replaces the
+  // shortcut line the way a `status` message does — but a `status` is a
+  // one-off with its own timer, and this has to stay up for as long as the
+  // analysis is running, then hand off to a status once it says how that went.
+  const [analyzing, setAnalyzing] = useState(Boolean(analysisPromise))
+  const [analyzingFor, setAnalyzingFor] = useState(0)
+
+  useEffect(() => {
+    if (!analysisPromise) return
+    let live = true
+    const startedAt = Date.now()
+    const ticker = setInterval(() => live && setAnalyzingFor(Math.round((Date.now() - startedAt) / 1000)), 1000)
+
+    analysisPromise.then((result) => {
+      clearInterval(ticker)
+      if (!live) return
+      setAnalyzing(false)
+      if (!result) {
+        setStatus({
+          tone: theme.risk.medium,
+          text: 'Analysis failed — still just the diff. Details print once you quit.',
+          ms: 8000,
+        })
+        return
+      }
+      setReview(result.review)
+      setStatus(
+        result.warnings.length
+          ? {
+              tone: theme.risk.medium,
+              text: `Analysis finished — ${result.warnings.length} correction(s) applied.`,
+              ms: 6000,
+            }
+          : { tone: theme.ui.draft, text: 'Analysis finished.', ms: 3000 },
+      )
+    })
+
+    return () => {
+      live = false
+      clearInterval(ticker)
+    }
+    // analysisPromise is created once, for the life of this run, so this
+    // effect is meant to fire exactly once rather than track a changing prop.
+  }, [])
 
   /**
    * Put the viewer back on screen after $EDITOR has had it.
@@ -1008,7 +1057,9 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
       { paddingX: 1 },
       status
         ? h(Text, { color: status.tone, wrap: 'truncate' }, status.text)
-        : h(Text, { color: theme.ui.muted, wrap: 'truncate' }, KEYS[focus]),
+        : analyzing
+          ? h(Text, { color: theme.ui.muted, wrap: 'truncate' }, `analyzing in the background… ${analyzingFor}s`)
+          : h(Text, { color: theme.ui.muted, wrap: 'truncate' }, KEYS[focus]),
     ),
   )
 }
@@ -1021,7 +1072,14 @@ function App({ review, reviewPath, repoRoot, ink, ui }) {
  * which cost an extra node startup and a round of env-var marshalling to say
  * "here is a file path".
  */
-export async function runViewer({ review, reviewPath, repoRoot = process.cwd(), config = null, warnings = [] }) {
+export async function runViewer({
+  review,
+  reviewPath,
+  repoRoot = process.cwd(),
+  config = null,
+  warnings = [],
+  analysisPromise = null,
+}) {
   // Ink needs raw mode on a real terminal. Without this guard, piping the
   // output or running under CI ends in a wall of React reconciler stack trace
   // that says nothing about what actually went wrong. The analysis is the
@@ -1055,7 +1113,7 @@ export async function runViewer({ review, reviewPath, repoRoot = process.cwd(), 
   // not exist until render() returns.
   const ink = {}
   try {
-    ink.instance = render(h(App, { review, reviewPath, repoRoot, ink, ui }), { exitOnCtrlC: false })
+    ink.instance = render(h(App, { review, reviewPath, repoRoot, ink, ui, analysisPromise }), { exitOnCtrlC: false })
     await ink.instance.waitUntilExit()
   } finally {
     // Leaving the alternate screen has to happen even if the render threw, or

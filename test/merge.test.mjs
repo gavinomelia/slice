@@ -158,4 +158,10 @@ test('bareReview still lists every file when no analysis ran', () => {
   assert.deepEqual(review.slices[0].paths, ['app/post.rb'])
   assert.equal(review.findings.length, 0)
   assert.ok(review.taxonomy.severities.bug)
+  assert.equal(review.overview.assessment, 'No analysis was run for this review.')
+})
+
+test('bareReview takes a custom assessment, for the review the viewer opens on while analysis is still running', () => {
+  const review = bareReview({ target, files, assessment: 'Analysis is running in the background.' })
+  assert.equal(review.overview.assessment, 'Analysis is running in the background.')
 })

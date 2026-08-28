@@ -323,6 +323,7 @@ function runAnalysis({
   conventionFiles,
   config,
   provider,
+  quiet = false,
 }) {
   const prompt = analysisPrompt({ patchPath, filesPath, target, repoRoot, conventionFiles, config })
 
@@ -330,9 +331,12 @@ function runAnalysis({
 
   // A \r-redrawn counter is for a person watching it. Sent to a pipe or a log
   // file it is one junk line per second, so a non-tty gets a single line
-  // instead and still knows something long-running has started.
-  const live = process.stderr.isTTY
-  if (!live) console.error('  analyzing — reading the repo…')
+  // instead and still knows something long-running has started. `quiet` is a
+  // third case: the viewer is already drawing to this terminal, and either
+  // form of progress line would tear its screen up, so nothing is written and
+  // the viewer's own status line carries the news instead.
+  const live = !quiet && process.stderr.isTTY
+  if (!quiet && !live) console.error('  analyzing — reading the repo…')
   const ticker = live
     ? setInterval(() => {
         process.stderr.write(`\r  analyzing — reading the repo… ${Math.round((Date.now() - startedAt) / 1000)}s`)
@@ -354,9 +358,11 @@ function runAnalysis({
       if (ticker) clearInterval(ticker)
       clearTimeout(timer)
       if (live) process.stderr.write(`\r${' '.repeat(56)}\r`)
-      const elapsed = `${Math.round((Date.now() - startedAt) / 1000)}s`
-      if (message) console.error(`  analysis failed after ${elapsed}: ${message}`)
-      else console.log(`  analysis finished in ${elapsed}`)
+      if (!quiet) {
+        const elapsed = `${Math.round((Date.now() - startedAt) / 1000)}s`
+        if (message) console.error(`  analysis failed after ${elapsed}: ${message}`)
+        else console.log(`  analysis finished in ${elapsed}`)
+      }
       done(value)
     }
 
@@ -557,6 +563,10 @@ async function main() {
   )
 
   let analysis = null
+  // Set only when analysis is running against a live viewer: it resolves to
+  // { review, warnings } once the provider replies, or null if it failed.
+  let analysisPromise = null
+
   if (!options.analyze) {
     console.log('  no AI analysis (pass --ai for slices, summaries, and findings)')
   } else if (existsSync(analysisPath) && !options.refresh) {
@@ -598,7 +608,13 @@ async function main() {
         console.log(`  also asked: ${line.length > 68 ? `${line.slice(0, 67)}…` : line}`)
       }
 
-      analysis = await runAnalysis({
+      // With a real terminal on both ends, there is a viewer to open on the
+      // bare diff right away rather than a spinner to stare at — so the
+      // analysis runs in the background and the viewer is told to wait for
+      // it instead of this function waiting here.
+      const interactive = process.stdout.isTTY && process.stdin.isTTY
+
+      const task = runAnalysis({
         repoRoot,
         target,
         patchPath,
@@ -608,15 +624,61 @@ async function main() {
         conventionFiles,
         config,
         provider,
+        quiet: interactive,
       })
+
+      if (interactive) {
+        // Nothing here may touch stdout or stderr: the viewer already owns the
+        // terminal by the time this settles, and anything printed lands on top
+        // of its alternate screen instead of the scrollback. Files are still
+        // written so the result is cached and `main` can report on it once the
+        // terminal is back.
+        analysisPromise = task.then((result) => {
+          if (!result) return null
+          writeFileSync(analysisPath, JSON.stringify(result, null, 2))
+          rmSync(rawPath, { force: true })
+          const merged = mergeReview({ target, files, analysis: result, config })
+          writeFileSync(reviewPath, JSON.stringify(merged.review, null, 2))
+          return merged
+        })
+      } else {
+        analysis = await task
+      }
     }
 
-    if (analysis) {
-      writeFileSync(analysisPath, JSON.stringify(analysis, null, 2))
-      rmSync(rawPath, { force: true })
-    } else {
-      console.error('  opening the diff without analysis')
+    if (!analysisPromise) {
+      if (analysis) {
+        writeFileSync(analysisPath, JSON.stringify(analysis, null, 2))
+        rmSync(rawPath, { force: true })
+      } else {
+        console.error('  opening the diff without analysis')
+      }
     }
+  }
+
+  if (analysisPromise) {
+    const review = bareReview({
+      target,
+      files,
+      config,
+      assessment: 'Analysis is running in the background — this pane updates when it finishes.',
+    })
+    writeFileSync(reviewPath, JSON.stringify(review, null, 2))
+    await runViewer({ review, reviewPath, repoRoot, config, warnings: configWarnings, analysisPromise })
+
+    // The viewer has given the terminal back by the time this line runs,
+    // whether the analysis finished while it was still open or the user quit
+    // first — either way, this is the first point since it kicked off that
+    // printing anything is safe.
+    const result = await analysisPromise
+    if (!result) {
+      console.error('  analysis failed; the diff stayed open without it')
+    } else if (result.warnings.length > 0) {
+      console.log(`\n  ${result.warnings.length} correction(s) applied to the analysis:`)
+      for (const warning of result.warnings.slice(0, 8)) console.log(`    · ${warning}`)
+      if (result.warnings.length > 8) console.log(`    · …and ${result.warnings.length - 8} more`)
+    }
+    return
   }
 
   const { review, warnings } = analysis
