@@ -23,9 +23,15 @@ const build = (analysis) => mergeReview({ target, files, analysis })
 test('annotatableLines tracks both sides, counting context on each', () => {
   const { additions, deletions } = annotatableLines(PATCH)
   // Context at 10, then two additions at 11 and 12.
-  assert.deepEqual([...additions].sort((a, b) => a - b), [10, 11, 12])
+  assert.deepEqual(
+    [...additions].sort((a, b) => a - b),
+    [10, 11, 12],
+  )
   // Context at 10, then the removed line at 11.
-  assert.deepEqual([...deletions].sort((a, b) => a - b), [10, 11])
+  assert.deepEqual(
+    [...deletions].sort((a, b) => a - b),
+    [10, 11],
+  )
 })
 
 test('a finding on a line outside the diff is demoted, not dropped', () => {

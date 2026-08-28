@@ -11,8 +11,7 @@
  * A segment is `{ text, color?, bg?, bold?, dim?, italic?, underline? }`.
  */
 
-const INLINE =
-  /(`[^`\n]+`|\*\*[^*\n]+\*\*|__[^_\n]+__|\*[^*\n]+\*|(?<![\w])_[^_\n]+_(?![\w])|\[[^\]\n]+\]\([^)\n]+\))/
+const INLINE = /(`[^`\n]+`|\*\*[^*\n]+\*\*|__[^_\n]+__|\*[^*\n]+\*|(?<![\w])_[^_\n]+_(?![\w])|\[[^\]\n]+\]\([^)\n]+\))/
 
 /**
  * Colours, replaced wholesale by the app once config is resolved.
@@ -55,7 +54,10 @@ export function sliceSegments(segments, from, width) {
   for (const segment of segments) {
     const end = at + segment.text.length
     if (end > from && at < until) {
-      out.push({ ...segment, text: segment.text.slice(Math.max(0, from - at), Math.min(segment.text.length, until - at)) })
+      out.push({
+        ...segment,
+        text: segment.text.slice(Math.max(0, from - at), Math.min(segment.text.length, until - at)),
+      })
     }
     at = end
     if (at >= until) break

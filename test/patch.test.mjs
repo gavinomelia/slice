@@ -66,14 +66,27 @@ test('reads paths containing spaces from the ---/+++ lines', () => {
   // The `diff --git` line is ambiguous when a path has a space in it, which is
   // exactly why the body is preferred over the header.
   const [file] = splitPatch(
-    diff('diff --git a/my dir/a b.rb b/my dir/a b.rb', '--- a/my dir/a b.rb', '+++ b/my dir/a b.rb', '@@ -1 +1 @@', '+x'),
+    diff(
+      'diff --git a/my dir/a b.rb b/my dir/a b.rb',
+      '--- a/my dir/a b.rb',
+      '+++ b/my dir/a b.rb',
+      '@@ -1 +1 @@',
+      '+x',
+    ),
   )
   assert.equal(file.path, 'my dir/a b.rb')
 })
 
 test('a deleted file is keyed by its old path, not /dev/null', () => {
   const [file] = splitPatch(
-    diff('diff --git a/gone.rb b/gone.rb', 'deleted file mode 100644', '--- a/gone.rb', '+++ /dev/null', '@@ -1 +0,0 @@', '-x'),
+    diff(
+      'diff --git a/gone.rb b/gone.rb',
+      'deleted file mode 100644',
+      '--- a/gone.rb',
+      '+++ /dev/null',
+      '@@ -1 +0,0 @@',
+      '-x',
+    ),
   )
   assert.equal(file.path, 'gone.rb')
 })

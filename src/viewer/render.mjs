@@ -90,7 +90,20 @@ export function highlighter(lang, theme = DEFAULT_THEMES.dark) {
 }
 
 /** Languages worth having warm for fenced blocks inside a finding's `fix`. */
-const FIX_LANGS = ['ruby', 'javascript', 'typescript', 'erb', 'html', 'css', 'scss', 'json', 'yaml', 'shellscript', 'sql', 'diff']
+const FIX_LANGS = [
+  'ruby',
+  'javascript',
+  'typescript',
+  'erb',
+  'html',
+  'css',
+  'scss',
+  'json',
+  'yaml',
+  'shellscript',
+  'sql',
+  'diff',
+]
 
 /**
  * A synchronous `(code, lang) => Segment[][]` for the markdown renderer.

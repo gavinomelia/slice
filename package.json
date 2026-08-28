@@ -1,7 +1,7 @@
 {
   "name": "@gavinomelia/slice",
   "version": "0.1.0",
-  "description": "Read a pull request as behavioral slices, not as a pile of files \u2014 an AI-analyzed diff in your terminal",
+  "description": "Read a pull request as behavioral slices, not as a pile of files — an AI-analyzed diff in your terminal",
   "keywords": [
     "pull-request",
     "code-review",
@@ -35,11 +35,16 @@
   },
   "scripts": {
     "slice": "node bin/slice.mjs",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
   "dependencies": {
     "@pierre/diffs": "^1.3.6",
     "ink": "^6.6.0",
     "react": "^19.2.8"
+  },
+  "devDependencies": {
+    "prettier": "^3.4.2"
   }
 }

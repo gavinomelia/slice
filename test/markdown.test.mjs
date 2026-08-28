@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { markdownLines, padSegments, parseInline, segmentsWidth, sliceSegments, wrapSegments } from '../src/viewer/markdown.mjs'
+import {
+  markdownLines,
+  padSegments,
+  parseInline,
+  segmentsWidth,
+  sliceSegments,
+  wrapSegments,
+} from '../src/viewer/markdown.mjs'
 
 const text = (segments) => segments.map((s) => s.text).join('')
 
@@ -13,7 +20,13 @@ test('sliceSegments takes a column window and keeps styling', () => {
   ]
   const full = text(segments)
 
-  for (const [from, width] of [[0, 5], [3, 6], [6, 5], [8, 100], [100, 10]]) {
+  for (const [from, width] of [
+    [0, 5],
+    [3, 6],
+    [6, 5],
+    [8, 100],
+    [100, 10],
+  ]) {
     assert.equal(text(sliceSegments(segments, from, width)), full.slice(from, from + width), `${from}+${width}`)
   }
   // Styling survives the cut.
@@ -58,7 +71,10 @@ test('fenced code keeps its own line breaks and indentation', () => {
   const lines = markdownLines('before\n\n```ruby\ndef a\n  b\nend\n```\n\nafter', 40)
   const rendered = lines.map(text)
   assert.ok(rendered.some((l) => l.includes('def a')))
-  assert.ok(rendered.some((l) => l.includes('  b')), 'indentation inside a fence is preserved')
+  assert.ok(
+    rendered.some((l) => l.includes('  b')),
+    'indentation inside a fence is preserved',
+  )
 })
 
 test('an unterminated fence still renders', () => {

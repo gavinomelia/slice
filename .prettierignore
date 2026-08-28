@@ -1,0 +1,7 @@
+node_modules
+package-lock.json
+
+# Prose, wrapped by hand for readability rather than to a column count.
+README.md
+CHANGELOG.md
+CONTRIBUTING.md

@@ -70,7 +70,12 @@ test('a prompt file honours instructions too, wherever it puts them', () => {
 
 test('the output schema is always present, whatever is overridden', () => {
   const config = mergePatch(DEFAULT_CONFIG, {
-    review: { slicing: { replace: 'x' }, summaries: { replace: 'x' }, findings: { replace: 'x' }, anchoring: { replace: 'x' } },
+    review: {
+      slicing: { replace: 'x' },
+      summaries: { replace: 'x' },
+      findings: { replace: 'x' },
+      anchoring: { replace: 'x' },
+    },
   })
   assert.match(build(config), /"slices": \[/, 'the viewer and the validator both depend on this shape')
 })

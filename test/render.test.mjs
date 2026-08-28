@@ -64,7 +64,15 @@ test('carries both numberings for a context line', async () => {
   // split view can show two gutters.
   const built = await buildRows({
     path: 'a.txt',
-    patch: diff('diff --git a/a.txt b/a.txt', '--- a/a.txt', '+++ b/a.txt', '@@ -1,2 +5,2 @@', ' kept', '-gone', '+here'),
+    patch: diff(
+      'diff --git a/a.txt b/a.txt',
+      '--- a/a.txt',
+      '+++ b/a.txt',
+      '@@ -1,2 +5,2 @@',
+      ' kept',
+      '-gone',
+      '+here',
+    ),
   })
 
   const context = built.find((row) => row.kind === 'ctx')
