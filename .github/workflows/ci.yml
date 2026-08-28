@@ -11,8 +11,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 20 is the floor declared in engines; 22 and 24 are the active LTS
-        # lines. Ink and Shiki are the parts most likely to care.
+        # 20 is the floor declared in engines, and what .nvmrc pins; 22 and 24
+        # are the active LTS lines. Ink and Shiki are the parts most likely to
+        # care.
         node: ['20', '22', '24']
     steps:
       - uses: actions/checkout@v4
@@ -23,6 +24,17 @@ jobs:
       - run: npm ci
       - run: npm test
 
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - run: npm run format:check
+
   # The CLI has no test coverage of its own — it talks to gh, git and claude —
   # so at minimum prove it parses and its entry points load on every push.
   smoke:
@@ -31,7 +43,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '20'
           cache: npm
       - run: npm ci
       - run: node --check bin/slice.mjs
@@ -40,3 +52,10 @@ jobs:
       - run: node bin/slice.mjs --print-config
       - name: viewer module loads
         run: node -e "import('./src/viewer/app.mjs').then(m => { if (!m.runViewer) process.exit(1) })"
+      # engines says >=20 and the package declares darwin/linux only; catch a
+      # manifest that no longer installs cleanly before anyone else does.
+      - name: the package installs from a tarball
+        run: |
+          npm pack
+          npm install -g ./gavinomelia-slice-*.tgz
+          slice --version

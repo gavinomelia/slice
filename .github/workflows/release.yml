@@ -1,0 +1,45 @@
+name: Release
+
+# Publishing is driven by a tag, so what ships is always a commit that exists
+# in history rather than whatever happened to be on a laptop.
+#
+# One-time setup: add an npm automation token as the NPM_TOKEN secret. Trusted
+# publishing via OIDC needs `id-token: write`, which is why it is requested
+# below — it is also what puts a provenance attestation on the published
+# package, letting anyone verify the tarball was built from this repo.
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm test
+
+      # A tag that disagrees with package.json publishes the wrong version
+      # under the right name, and npm will not let you take it back.
+      - name: the tag matches package.json
+        run: |
+          tagged="${GITHUB_REF_NAME#v}"
+          packaged="$(node -p "require('./package.json').version")"
+          if [ "$tagged" != "$packaged" ]; then
+            echo "tag $GITHUB_REF_NAME does not match package.json version $packaged" >&2
+            exit 1
+          fi
+
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
