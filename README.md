@@ -13,6 +13,7 @@ slice 1679        # browse the diff for PR #1679
 slice my-branch   # that branch's PR, or diff the branch if it has none
 slice             # the PR for the current branch, or the branch diff
 slice --branch    # local branch vs its base, before a PR exists
+slice --wip       # what you have not committed yet
 slice 1679 --ai   # add the AI-analyzed review: slices, summaries, findings
 slice -p "..."    # analyze, with something extra to say about how
 ```
@@ -26,6 +27,42 @@ By default slice just opens the diff. No model runs. Pass `--ai` for the
 analyzed review. Without it, files are not grouped into slices, but they are
 still ordered by when they were first committed, not alphabetically, which is
 usually close to the order the change was built in.
+
+`--ai` is what produces an analysis, not what displays one. Once a review has
+been analyzed, quitting and running `slice` again reopens the breakdown you
+already have — no flag to remember, and still no model run, since reading a
+cached analysis spawns nothing. `--refresh` redoes it.
+
+## Before you commit
+
+`--wip` reviews the change you are in the middle of: everything staged,
+everything unstaged, and every untracked file git is not ignoring, as one
+diff against the commit you are sitting on.
+
+```
+slice --wip
+slice --wip --ai
+```
+
+The header breaks down what it found — `4 changed file(s) — 2 staged, 1 with
+unstaged edits, 1 untracked` — because a file edited after it was staged is
+in two of those states at once, which is exactly the thing worth knowing
+before you commit.
+
+Untracked files are diffed against `/dev/null` with `git diff --no-index`, so
+they read as additions without being staged first. Reviewing your work never
+writes to your index.
+
+There is no commit history to borrow an order from, so `--wip` orders files
+by modification time instead: the order you touched them, which is usually
+the order you built the change in.
+
+A working tree changes under you between runs, so `--ai` keys its analysis to
+the exact diff it read. Edit something and the next run analyzes again rather
+than handing back a review of code you have already changed — the stale one
+is dropped rather than kept. Read marks survive the edit file by file, the
+way they do across a force-push: the file you changed comes back unread, the
+rest stay done.
 
 ## Saying something about this review
 
@@ -152,6 +189,7 @@ line cursor, or the findings pane's scroll.
 | `[` `]` | previous / next slice |
 | `n` `p` | next / previous finding, anywhere in the review |
 | `x` | mark the selected file — or whole slice — read, and move on |
+| `y` `Y` | copy the findings here — or the whole review's — as a fix prompt |
 | `c` | comment on the diff's cursor line |
 | `s` `A` `R` | submit as comment / approve / request changes |
 | `q` `ctrl-c` | quit |
@@ -224,6 +262,42 @@ Two constraints worth knowing:
   valid line anchor go into the review body instead.
 - GitHub rejects `APPROVE` and `REQUEST_CHANGES` on your own PR. Both are
   downgraded to a plain comment instead of failing the post.
+
+## Handing findings to something that can fix them
+
+A review that ends at "here are eleven problems" leaves you retyping them into
+an agent one at a time, which is where most of them quietly get dropped. `y`
+copies the findings the cursor is on — a file's, or a whole slice's on a slice
+header — as a fix prompt. `Y` takes the entire review. Paste it into whatever
+session you already have open.
+
+It scopes the way `x` does, off the tree's selection whichever pane has focus,
+and the pair reads together: `x` says you have read this, `y` says something
+else should fix it.
+
+The prompt is text, not a tool call. slice does not run the fixer, does not
+pick it, and does not touch your files — which is also what lets a review be
+handed to an agent that had nothing to do with producing it.
+
+What goes into it matters more than the list does:
+
+- Findings come ordered by severity, so a session that runs out of patience
+  spent it on the bugs.
+- A finding the analysis only suspected is marked, and the prompt says to
+  confirm it rather than change code to satisfy it.
+- A suggested fix is labelled the reviewer's guess, not a specification.
+- A finding anchored to a deleted line is described rather than handed over as
+  `path:line`. That number belongs to the version being edited, and would aim
+  the fixer at whatever sits on that line now.
+- For a PR or a branch it names the ref the findings were made against, since
+  the checkout on disk may not be it. For `--wip` it says the opposite: the
+  code is already in the working tree.
+
+Copying goes through `pbcopy` on macOS, and `wl-copy`, `xclip` or `xsel` on
+Linux. With none of them installed — over SSH, usually — the prompt is written
+to `<review>.fix.md` beside the review in the cache and the path is reported
+instead. A file you hand over as `@that-path` is a worse handoff than a paste,
+but it is still a handoff.
 
 ## Configuration
 
@@ -383,10 +457,10 @@ status leaves the other four alone.
 
 Artifacts are cached in `$XDG_CACHE_HOME/slice/<repo>/`, or
 `~/.cache/slice/` if that is unset, outside the repo either way, so
-reviewing never dirties your working tree. Re-run with `--ai --refresh` to
-redo the analysis; plain `--ai` reuses a cached one if there is one. A run
-with `-p` gets its own entry, keyed by a hash of the instructions, so it
-neither reads nor overwrites the plain review of the same diff.
+reviewing never dirties your working tree. A cached analysis is reused by any
+later run against the same diff, with or without `--ai`; `--refresh` redoes
+it. A run with `-p` gets its own entry, keyed by a hash of the instructions,
+so it neither reads nor overwrites the plain review of the same diff.
 
 Your unposted drafts and your read marks live there too, keyed to the same
 review, which is what lets both survive closing the terminal.
@@ -419,6 +493,7 @@ src/viewer/             the terminal UI (ink)
   compose.mjs           $EDITOR composition and draft persistence
   progress.mjs          which files are marked read, and what invalidates that
   github.mjs            posting a review back
+  handoff.mjs           findings -> a fix prompt, and onto the clipboard
   theme.mjs             config + manifest -> what the viewer draws with
 src/config/             defaults, presets, and the JSONC loader
 test/                   node:test, no dependencies

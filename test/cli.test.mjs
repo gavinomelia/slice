@@ -10,7 +10,7 @@
  */
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -49,18 +49,47 @@ after(() => {
   rmSync(home, { recursive: true, force: true })
 })
 
-const slice = (...args) =>
+const sliceIn = (cwd, ...args) =>
   spawnSync(process.execPath, [BIN, ...args], {
-    cwd: repo,
+    cwd,
     encoding: 'utf8',
     env: { ...process.env, ...xdg, SLICE_CONFIG: '' },
   })
 
-const slug = repo
-  .split('/')
-  .pop()
-  .replace(/[^a-zA-Z0-9]+/g, '-')
-const cachedReview = (name) => join(xdg.XDG_CACHE_HOME, 'slice', slug, name)
+const slice = (...args) => sliceIn(repo, ...args)
+
+const slugFor = (dir) =>
+  dir
+    .split('/')
+    .pop()
+    .replace(/[^a-zA-Z0-9]+/g, '-')
+const cachedIn = (dir, name) => join(xdg.XDG_CACHE_HOME, 'slice', slugFor(dir), name)
+const cachedReview = (name) => cachedIn(repo, name)
+
+/**
+ * A repo of its own for each working-tree test.
+ *
+ * --wip reads whatever is lying around, so these tests have to leave things
+ * lying around — and a dirty shared tree would quietly change what every later
+ * test diffs.
+ */
+const scratch = []
+function wipRepo() {
+  const dir = mkdtempSync(join(tmpdir(), 'slice-wip-'))
+  scratch.push(dir)
+  const run = (...args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' })
+  run('init', '-q', '-b', 'main')
+  run('config', 'user.email', 'test@example.com')
+  run('config', 'user.name', 'Test')
+  writeFileSync(join(dir, 'a.rb'), 'class A\nend\n')
+  run('add', '-A')
+  run('commit', '-q', '-m', 'base')
+  return { dir, git: run }
+}
+
+after(() => {
+  for (const dir of scratch) rmSync(dir, { recursive: true, force: true })
+})
 
 test('--version prints just the version', () => {
   const { status, stdout } = slice('--version')
@@ -152,6 +181,150 @@ test('with no AI analysis, files are ordered by when they were first committed, 
 
   const review = JSON.parse(readFileSync(cachedReview('branch-order-branch.review.json'), 'utf8'))
   assert.deepEqual(review.slices[0].paths, ['z.rb', 'a.rb'])
+})
+
+test('--wip reviews staged, unstaged and untracked work as one diff', () => {
+  const { dir, git } = wipRepo()
+
+  writeFileSync(join(dir, 'a.rb'), 'class A\n  def a; end\nend\n')
+  git('add', 'a.rb')
+  // Edited again after staging, so this file is in both states at once.
+  appendFileSync(join(dir, 'a.rb'), '# still typing\n')
+  writeFileSync(join(dir, 'new.rb'), 'fresh\n')
+  writeFileSync(join(dir, '.gitignore'), 'build.log\n')
+  writeFileSync(join(dir, 'build.log'), 'noise\n')
+
+  const { status, stdout } = sliceIn(dir, '--wip')
+  assert.equal(status, 0, stdout)
+  assert.match(stdout, /working tree vs main/)
+  assert.match(stdout, /3 changed file\(s\) — 1 staged, 1 with unstaged edits, 2 untracked/)
+
+  const review = JSON.parse(readFileSync(cachedIn(dir, 'wip-main.review.json'), 'utf8'))
+  assert.deepEqual(
+    Object.keys(review.files).sort(),
+    ['.gitignore', 'a.rb', 'new.rb'],
+    'an ignored file is not part of the change',
+  )
+  assert.equal(review.files['new.rb'].status, 'added', 'an untracked file reads as added, not as missing')
+  assert.match(review.files['new.rb'].patch, /\+fresh/, 'and carries its contents, without being staged')
+  assert.equal(
+    git('status', '--porcelain', 'new.rb').stdout.slice(0, 2),
+    '??',
+    'reviewing an untracked file does not stage it',
+  )
+})
+
+test('--wip orders files by when you touched them, not alphabetically', () => {
+  const { dir } = wipRepo()
+  for (const name of ['c.rb', 'b.rb', 'd.rb']) writeFileSync(join(dir, name), `# ${name}\n`)
+
+  // Set mtimes explicitly: writing three files takes less time than the
+  // filesystem's timestamp resolution, so the order would otherwise be a
+  // coin toss.
+  const at = (name, seconds) => utimesSync(join(dir, name), seconds, seconds)
+  at('d.rb', 1_700_000_100)
+  at('b.rb', 1_700_000_200)
+  at('c.rb', 1_700_000_300)
+
+  const { status, stdout } = sliceIn(dir, '--wip')
+  assert.equal(status, 0, stdout)
+
+  const review = JSON.parse(readFileSync(cachedIn(dir, 'wip-main.review.json'), 'utf8'))
+  assert.deepEqual(review.slices[0].paths, ['d.rb', 'b.rb', 'c.rb'])
+})
+
+test('--wip on a clean tree says so rather than opening an empty review', () => {
+  const { dir } = wipRepo()
+  const { status, stderr } = sliceIn(dir, '--wip')
+  assert.equal(status, 1)
+  assert.match(stderr, /nothing uncommitted — the working tree is clean/)
+})
+
+test('--wip refuses the flags it would otherwise have to ignore', () => {
+  const { dir } = wipRepo()
+  writeFileSync(join(dir, 'a.rb'), 'changed\n')
+
+  assert.match(sliceIn(dir, '--wip', '--branch').stderr, /--wip and --branch are different diffs/)
+  assert.match(sliceIn(dir, '--wip', 'some-branch').stderr, /takes no PR number or branch \(got "some-branch"\)/)
+  assert.match(sliceIn(dir, '--wip', '--base', 'main').stderr, /--base belongs to --branch/)
+  for (const args of [
+    ['--wip', '--branch'],
+    ['--wip', 'some-branch'],
+    ['--wip', '--base', 'main'],
+  ]) {
+    assert.equal(sliceIn(dir, ...args).status, 1, args.join(' '))
+  }
+})
+
+test('a cached wip analysis is dropped once the tree it read has changed', () => {
+  const { dir } = wipRepo()
+  appendFileSync(join(dir, 'a.rb'), '# one\n')
+  assert.equal(sliceIn(dir, '--wip').status, 0)
+
+  // Stand in for a finished --ai run, keyed to the tree it analyzed, alongside
+  // cache entries belonging to other targets.
+  const analysis = cachedIn(dir, 'wip-main-deadbeef.analysis.json')
+  const other = cachedIn(dir, 'branch-main-deadbeef.analysis.json')
+  writeFileSync(analysis, '{}')
+  writeFileSync(other, '{}')
+
+  appendFileSync(join(dir, 'a.rb'), '# two\n')
+  assert.equal(sliceIn(dir, '--wip').status, 0)
+
+  assert.equal(existsSync(analysis), false, 'an analysis of code that has since changed is not kept to be reused')
+  assert.ok(existsSync(other), 'and nothing else in the cache is touched')
+  assert.ok(existsSync(cachedIn(dir, 'wip-main.review.json')), 'the review path is stable, so read marks survive')
+})
+
+test('an analysis already on disk is reopened without --ai', () => {
+  // Planted rather than produced: reusing a cached analysis must not reach the
+  // provider, which is the whole reason it is allowed without --ai.
+  git('checkout', '-q', '-b', 'cached-branch')
+  writeFileSync(join(repo, 'cached.rb'), 'work\n')
+  git('add', '-A')
+  git('commit', '-q', '-m', 'work')
+  git('checkout', '-q', 'main')
+
+  writeFileSync(
+    cachedReview('branch-cached-branch.analysis.json'),
+    JSON.stringify({
+      overview: { intent: 'Add a thing', assessment: 'Fine', risk: 'low' },
+      slices: [{ id: 'the-thing', title: 'The thing', kind: 'behavior', summary: 'One file.', paths: ['cached.rb'] }],
+      findings: [
+        {
+          severity: 'bug',
+          confidence: 'confirmed',
+          path: 'cached.rb',
+          line: 1,
+          title: 'Wrong',
+          why: 'It is.',
+          fix: '',
+        },
+      ],
+    }),
+  )
+
+  const { status, stdout } = slice('cached-branch', '--branch')
+  assert.equal(status, 0, stdout)
+  assert.match(stdout, /using the analysis from an earlier --ai run/)
+  assert.doesNotMatch(stdout, /no AI analysis/)
+  assert.match(stdout, /1 slice\(s\), 1 finding\(s\)/)
+
+  const review = JSON.parse(readFileSync(cachedReview('branch-cached-branch.review.json'), 'utf8'))
+  assert.equal(review.slices[0].title, 'The thing')
+  assert.equal(review.findings[0].title, 'Wrong')
+})
+
+test('--refresh does not quietly reuse the analysis it was asked to redo', () => {
+  // Aimed at a provider that cannot resolve, so this proves the refresh went
+  // looking for one — no test in this file may actually reach a model.
+  const configPath = join(mkdtempSync(join(tmpdir(), 'slice-refresh-')), 'config.jsonc')
+  writeFileSync(configPath, '{ "review": { "provider": "nope" } }')
+
+  const { status, stdout, stderr } = slice('cached-branch', '--branch', '--refresh', '--config', configPath)
+  assert.equal(status, 1)
+  assert.match(stderr, /unknown review\.provider "nope"/)
+  assert.doesNotMatch(stdout, /using the analysis|using cached analysis/, stdout)
 })
 
 test('probing git does not leak the child stderr', () => {

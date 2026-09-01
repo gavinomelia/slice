@@ -26,6 +26,7 @@ import {
 } from './markdown.mjs'
 import { composeInEditor, loadDrafts, saveDrafts, seedFromFinding } from './compose.mjs'
 import { partitionDrafts, postReview } from './github.mjs'
+import { handOff } from './handoff.mjs'
 import { buildTree, cellAt, draftKey, rowHasLine, sideAt, windowFor } from './tree.mjs'
 import { loadReviewed, nextUnreviewed, pathsForRow, saveReviewed, sliceReviewed, toggleReviewed } from './progress.mjs'
 import { viewerConfig } from './theme.mjs'
@@ -549,6 +550,32 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
     setStatus({ tone: theme.ui.reviewed, text: 'Every file in this review is marked read.' })
   }
 
+  /**
+   * Hand findings to something that can fix them. Scoped off the tree's
+   * selection like `x`, whichever pane has focus, so a file row hands over that
+   * file's findings and a slice header the slice's.
+   */
+  const yank = (all) => {
+    const chosen = all ? review.findings : findings
+    const result = handOff({ review, findings: chosen, reviewPath })
+
+    if (!result.ok) {
+      const where = all ? 'This review has no findings' : 'Nothing to hand over here'
+      return setStatus({ tone: theme.ui.muted, text: `${where} — press n to find the next one.` })
+    }
+
+    const scope = all ? 'the whole review' : (path ?? (slice ? `slice ${slice.title}` : 'the whole review'))
+    // A path you have to act on, so it stays up long enough to copy by hand.
+    if (result.path) {
+      return setStatus({
+        tone: theme.risk.medium,
+        text: `No clipboard tool found (pbcopy/wl-copy/xclip). ${result.count} finding(s) written to ${result.path}`,
+        ms: 10000,
+      })
+    }
+    setStatus({ tone: theme.ui.draft, text: `Copied ${result.count} finding(s) from ${scope}. Paste to fix.` })
+  }
+
   /** Write or edit the draft on the cursor's line; an empty body deletes it. */
   const commentOnCursor = async () => {
     const row = cellAt(view[cursor], side)
@@ -599,7 +626,8 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
   const submit = async (event) => {
     const { repo, number, viewerIsAuthor } = review.target
     if (review.target.kind !== 'pr' || !number) {
-      return setStatus({ tone: theme.risk.medium, text: 'This is a branch diff, not a PR — nothing to post to.' })
+      const what = review.target.kind === 'worktree' ? 'These are uncommitted changes' : 'This is a branch diff'
+      return setStatus({ tone: theme.risk.medium, text: `${what}, not a PR — nothing to post to.` })
     }
 
     const verb =
@@ -750,6 +778,7 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
     // Bound regardless of which pane has focus: it acts on what the tree has
     // selected, which is the same thing panes 2 and 3 are already showing.
     if (input === 'x') return toggleRead()
+    if (input === 'y' || input === 'Y') return yank(input === 'Y')
     if (input === 's' || input === 'A' || input === 'R') {
       const event = input === 'A' ? 'APPROVE' : input === 'R' ? 'REQUEST_CHANGES' : 'COMMENT'
       return void submit(event).catch((e) => setStatus({ tone: theme.risk.high, text: e.message }))
@@ -949,11 +978,11 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
   // not. Split spends its spare room teaching H/L, since two columns are the
   // only place a side to choose exists.
   const KEYS = {
-    tree: '[j/k] move  [[/]] slice  [x] read  [tab] pane  [n/p] finding  [q] quit',
+    tree: '[j/k] move  [[/]] slice  [x] read  [y] fix  [tab] pane  [n/p] finding  [q] quit',
     diff: split
       ? '[j/k] line  [H/L] side  [h/l] scroll  [v] unified  [c] comment  [x] read  [s/A/R] submit'
       : '[j/k] line  [h/l] scroll  [v] split  [z] zoom  [c] comment  [x] read  [s/A/R] submit',
-    findings: '[j/k] scroll  [n/p] finding  [c] comment  [x] read  [tab] pane  [q] quit',
+    findings: '[j/k] scroll  [n/p] finding  [c] comment  [y] fix  [x] read  [tab] pane  [q] quit',
   }
 
   return h(

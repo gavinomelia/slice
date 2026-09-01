@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -29,15 +29,18 @@ Usage:
   slice 1679         review PR #1679
   slice my-branch    review that branch's PR, or diff the branch if it has none
   slice --branch     review the local branch diff, ignoring any open PR
+  slice --wip        review what you have not committed yet
 
   By default this just opens the diff in the viewer — no model runs. Pass
-  --ai for the AI-analyzed review: slices, summaries, and findings.
+  --ai for the AI-analyzed review: slices, summaries, and findings. Once one
+  exists it is reopened without --ai, so the flag is only for producing one.
 
 Options:
   -a, --ai          run the AI analysis (slicing, summaries, findings)
   -p, --prompt <t>  add instructions to the review prompt (implies --ai);
                     repeatable — slice -p "review for security in particular"
   --branch          diff the local branch against its base instead of a PR
+  --wip             diff the working tree: staged, unstaged, and untracked
   --base <ref>      base ref for --branch mode (default: the repo default branch)
   --refresh         re-run the analysis even if a cached one exists (implies --ai)
   --open <file>     open a cached review.json without touching git or the model
@@ -95,6 +98,7 @@ function parseArgs(argv) {
   const options = {
     ref: null,
     branch: false,
+    wip: false,
     base: null,
     refresh: false,
     analyze: false,
@@ -141,6 +145,7 @@ function parseArgs(argv) {
       // one — otherwise `--init-config 1679` would eat the PR number.
       options.initConfig = ['repo', 'user'].includes(argv[i + 1]) ? argv[++i] : 'repo'
     } else if (arg === '--branch') options.branch = true
+    else if (arg === '--wip') options.wip = true
     else if (arg === '--refresh') options.refresh = true
     else if (arg === '-a' || arg === '--ai') options.analyze = true
     else if (arg === '-p' || arg === '--prompt') {
@@ -179,6 +184,15 @@ function parseArgs(argv) {
   // in the first place — otherwise either flag with no --ai silently does
   // nothing.
   if (options.refresh || options.prompt) options.analyze = true
+
+  // --wip has nothing to resolve: the diff is whatever is on disk right now.
+  // Accepting any of these and then ignoring it reads exactly like the flag
+  // having worked, which is how you end up reviewing the wrong diff.
+  if (options.wip) {
+    if (options.branch) fail('--wip and --branch are different diffs — pass one or the other')
+    if (options.ref) fail(`--wip reviews the working tree, so it takes no PR number or branch (got "${options.ref}")`)
+    if (options.base) fail('--base belongs to --branch — --wip always diffs against the commit you are on')
+  }
   return options
 }
 
@@ -248,7 +262,121 @@ function resolveBranchTarget(repoRoot, base, ref = null) {
   }
 }
 
+/** The tree every repo has before its first commit, so an unborn branch still diffs. */
+const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
+
+/**
+ * The working tree as a review target: staged, unstaged, and untracked, all
+ * against the commit you are sitting on.
+ *
+ * There is no ref naming the head side — the files on disk are the head — so
+ * `headRev` and `headSha` stay null, and anything that walks git history has
+ * to check `kind` before reaching for them.
+ */
+function resolveWorktreeTarget(repoRoot) {
+  // `git branch --show-current` rather than rev-parse: it answers on a branch
+  // with no commits yet, where HEAD is not a revision at all, and returns
+  // empty on a detached HEAD instead of the string "HEAD".
+  const branch = tryRun('git', ['branch', '--show-current'], { cwd: repoRoot }) || ''
+  const headSha = tryRun('git', ['rev-parse', 'HEAD'], { cwd: repoRoot })
+
+  return {
+    kind: 'worktree',
+    repo: tryRun('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'], { cwd: repoRoot }) ?? '',
+    number: null,
+    title: 'Uncommitted changes',
+    author: tryRun('git', ['config', 'user.name'], { cwd: repoRoot }) ?? 'you',
+    url: null,
+    branch,
+    baseRef: branch || (headSha ? headSha.slice(0, 7) : 'the empty tree'),
+    baseRev: headSha ?? EMPTY_TREE,
+    headRef: 'working tree',
+    headRev: null,
+    headSha: null,
+    viewerIsAuthor: true,
+  }
+}
+
+/**
+ * A patch for one untracked file, without staging it.
+ *
+ * `git diff` cannot see a file git has never been told about, and the usual
+ * trick for that — `git add -N` — writes to the index, which is not something
+ * a review should do to somebody's half-staged work. `--no-index` diffs the
+ * file against /dev/null and touches nothing. It exits 1 because the two
+ * differ, which is the entire point, so the patch is read off the thrown
+ * error rather than the return value.
+ */
+function untrackedPatch(repoRoot, path) {
+  try {
+    return run('git', ['diff', '--no-index', '--', '/dev/null', path], { cwd: repoRoot })
+  } catch (error) {
+    // Exit 1 is the difference itself, and the patch rides out on the error.
+    // Anything else — a file that vanished between the listing and now, or one
+    // this user cannot read — leaves nothing to salvage, and null says so.
+    const patch = typeof error.stdout === 'string' ? error.stdout.trim() : ''
+    return patch || null
+  }
+}
+
+function worktreePatch(repoRoot, target) {
+  // Against the commit, not the index, so one diff carries both what is staged
+  // and what is not — the distinction matters when you commit, not when you
+  // read the change.
+  const parts = [run('git', ['diff', target.baseRev, '--'], { cwd: repoRoot })]
+  const skipped = []
+
+  for (const path of untrackedFiles(repoRoot)) {
+    const patch = untrackedPatch(repoRoot, path)
+    if (patch === null) skipped.push(path)
+    else parts.push(patch)
+  }
+
+  // A file dropped from the diff without a word is a file you will believe you
+  // have reviewed.
+  if (skipped.length > 0) {
+    const named = skipped.slice(0, 5).join(', ')
+    const rest = skipped.length > 5 ? `, and ${skipped.length - 5} more` : ''
+    console.error(
+      `  could not diff ${skipped.length} untracked file(s), so they are not in this review: ${named}${rest}`,
+    )
+  }
+
+  const patch = parts.filter((part) => part.trim()).join('\n')
+  return patch ? `${patch}\n` : ''
+}
+
+/**
+ * "2 staged, 1 with unstaged edits, 1 untracked" — the one thing a working-tree
+ * diff hides that a PR diff has no equivalent of. A file edited after it was
+ * staged is in two of those states at once, and is counted in both, because
+ * that is the case worth noticing before you commit.
+ */
+function worktreeStates(repoRoot, files) {
+  const names = (args) => new Set((tryRun('git', args, { cwd: repoRoot }) || '').split('\n').filter(Boolean))
+  const staged = names(['diff', '--cached', '--name-only'])
+  const unstaged = names(['diff', '--name-only'])
+  const untracked = new Set(untrackedFiles(repoRoot))
+
+  const count = (set) => files.filter(({ path, prevPath }) => set.has(path) || (prevPath && set.has(prevPath))).length
+  return [
+    [count(staged), 'staged'],
+    [count(unstaged), 'with unstaged edits'],
+    [count(untracked), 'untracked'],
+  ]
+    .filter(([n]) => n > 0)
+    .map(([n, what]) => `${n} ${what}`)
+    .join(', ')
+}
+
+/** Untracked but not ignored: build output and node_modules are not your change. */
+function untrackedFiles(repoRoot) {
+  const listed = tryRun('git', ['ls-files', '--others', '--exclude-standard'], { cwd: repoRoot })
+  return listed ? listed.split('\n').filter(Boolean) : []
+}
+
 function capturePatch(repoRoot, target) {
+  if (target.kind === 'worktree') return worktreePatch(repoRoot, target)
   if (target.kind === 'pr') {
     const args = ['pr', 'diff', String(target.number), ...(target.repo ? ['--repo', target.repo] : [])]
     const patch = tryRun('gh', args, { cwd: repoRoot })
@@ -281,7 +409,28 @@ function commitOrder(repoRoot, target) {
   return order
 }
 
-function orderByCommit(files, order) {
+/**
+ * Uncommitted work has no commit order to borrow, so the diff arrives
+ * alphabetically — the ordering slice exists to get away from. Modification
+ * time is the nearest honest substitute: the order you touched the files is
+ * usually the order you built the change in. A file no longer on disk has no
+ * mtime and sorts last.
+ */
+function worktreeOrder(repoRoot, files) {
+  const touchedAt = (path) => {
+    try {
+      return statSync(join(repoRoot, path)).mtimeMs
+    } catch {
+      return Infinity
+    }
+  }
+  return files
+    .map((file) => ({ path: file.path, at: touchedAt(file.path) }))
+    .sort((a, b) => a.at - b.at)
+    .map(({ path }) => path)
+}
+
+function orderByPaths(files, order) {
   if (!order) return files
   const rank = new Map(order.map((path, i) => [path, i]))
   return files
@@ -415,6 +564,21 @@ function printConfig({ config, sources }) {
   console.log(JSON.stringify(config, null, 2))
 }
 
+/**
+ * Drop analyses of working-tree states that no longer exist.
+ *
+ * Every edit gives the next analysis a new name, so without this the cache
+ * grows one more file each time you re-run --ai, and all but the newest
+ * describe code that is gone. `id` is built from `safe()`, so it is only ever
+ * [a-zA-Z0-9-] and needs no escaping here.
+ */
+function pruneStaleAnalyses(cacheDir, id, keep) {
+  const stale = new RegExp(`^${id}-[0-9a-f]{8}(-[0-9a-f]{8})?\\.analysis\\.(json|raw\\.txt)$`)
+  for (const name of readdirSync(cacheDir)) {
+    if (stale.test(name) && !name.startsWith(keep)) rmSync(join(cacheDir, name), { force: true })
+  }
+}
+
 /** Everything slice caches lives under one directory, so it can all be dropped at once. */
 const cacheHome = () => join(process.env.XDG_CACHE_HOME || join(homedir(), '.cache'), 'slice')
 
@@ -505,9 +669,11 @@ async function main() {
   if (!repoRoot) fail('not inside a git repository')
 
   const asBranch = () => resolveBranchTarget(repoRoot, options.base, options.branch ? options.ref : null)
-  const target = options.branch
-    ? asBranch()
-    : (resolvePrTarget(repoRoot, options.ref) ?? resolveBranchTarget(repoRoot, options.base, options.ref))
+  const target = options.wip
+    ? resolveWorktreeTarget(repoRoot)
+    : options.branch
+      ? asBranch()
+      : (resolvePrTarget(repoRoot, options.ref) ?? resolveBranchTarget(repoRoot, options.base, options.ref))
 
   if (!target) {
     const why = ghDiagnosis(repoRoot)
@@ -525,26 +691,58 @@ async function main() {
     else if (options.ref) console.error(`  no open PR for "${options.ref}" — diffing the branch instead.`)
   }
 
-  const label = target.kind === 'pr' ? `PR #${target.number}` : `branch ${target.headRef} vs ${target.baseRef}`
+  const label =
+    target.kind === 'pr'
+      ? `PR #${target.number}`
+      : target.kind === 'worktree'
+        ? `working tree vs ${target.baseRef}`
+        : `branch ${target.headRef} vs ${target.baseRef}`
   console.log(`\n  ${target.title}\n  ${label}\n`)
 
   const patch = capturePatch(repoRoot, target)
-  const files = orderByCommit(splitPatch(patch), commitOrder(repoRoot, target))
-  if (files.length === 0) fail('no file changes found in the diff')
-  console.log(`  ${files.length} changed file(s)`)
+  const changed = splitPatch(patch)
+  const files = orderByPaths(
+    changed,
+    target.kind === 'worktree' ? worktreeOrder(repoRoot, changed) : commitOrder(repoRoot, target),
+  )
+  if (files.length === 0) {
+    fail(
+      target.kind === 'worktree'
+        ? 'nothing uncommitted — the working tree is clean'
+        : 'no file changes found in the diff',
+    )
+  }
+  const states = target.kind === 'worktree' ? worktreeStates(repoRoot, files) : ''
+  console.log(`  ${files.length} changed file(s)${states ? ` — ${states}` : ''}`)
 
-  const slug = (target.repo || repoRoot.split('/').pop()).replace(/[^a-zA-Z0-9]+/g, '-')
-  const id = target.kind === 'pr' ? `pr-${target.number}` : `branch-${target.headRef.replace(/[^a-zA-Z0-9]+/g, '-')}`
+  const safe = (value) => String(value).replace(/[^a-zA-Z0-9]+/g, '-')
+  const slug = safe(target.repo || repoRoot.split('/').pop())
+  const id =
+    target.kind === 'pr'
+      ? `pr-${target.number}`
+      : target.kind === 'worktree'
+        ? `wip-${safe(target.branch || 'detached')}`
+        : `branch-${safe(target.headRef)}`
   const cacheDir = join(cacheHome(), slug)
   mkdirSync(cacheDir, { recursive: true })
 
   const tag = options.prompt ? `-${createHash('sha256').update(options.prompt).digest('hex').slice(0, 8)}` : ''
 
+  // A working tree changes under you between runs, so an analysis keyed only by
+  // branch would come back as current while describing code you have since
+  // edited — the one failure this mode invites that the others do not. Keying
+  // it to the patch it actually read makes that impossible. The review path
+  // stays stable, so read marks and drafts still carry across an edit, file by
+  // file, the way they already do across a force-push.
+  const stamp = target.kind === 'worktree' ? `-${createHash('sha256').update(patch).digest('hex').slice(0, 8)}` : ''
+
   const patchPath = join(cacheDir, `${id}.patch`)
   const filesPath = join(cacheDir, `${id}.files.json`)
-  const analysisPath = join(cacheDir, `${id}${tag}.analysis.json`)
-  const rawPath = join(cacheDir, `${id}${tag}.analysis.raw.txt`)
+  const analysisPath = join(cacheDir, `${id}${stamp}${tag}.analysis.json`)
+  const rawPath = join(cacheDir, `${id}${stamp}${tag}.analysis.raw.txt`)
   const reviewPath = join(cacheDir, `${id}${tag}.review.json`)
+
+  if (stamp) pruneStaleAnalyses(cacheDir, id, `${id}${stamp}`)
 
   writeFileSync(patchPath, patch)
   writeFileSync(
@@ -567,10 +765,22 @@ async function main() {
   // { review, warnings } once the provider replies, or null if it failed.
   let analysisPromise = null
 
-  if (!options.analyze) {
+  // Reopening an analysis already on disk spawns no provider and sends nothing
+  // anywhere, so --ai is what produces one, not what displays it. An earlier
+  // run therefore carries: quitting the viewer and typing `slice` again brings
+  // back the breakdown instead of a plain diff.
+  const cached = existsSync(analysisPath) && !options.refresh
+
+  if (!options.analyze && !cached) {
     console.log('  no AI analysis (pass --ai for slices, summaries, and findings)')
-  } else if (existsSync(analysisPath) && !options.refresh) {
-    console.log('  using cached analysis (--refresh to redo)')
+  } else if (cached) {
+    // Saying which run it came from matters when you did not ask for one:
+    // otherwise slices appear from a command that promises not to analyze.
+    console.log(
+      options.analyze
+        ? '  using cached analysis (--refresh to redo)'
+        : '  using the analysis from an earlier --ai run (--refresh to redo)',
+    )
     try {
       analysis = JSON.parse(readFileSync(analysisPath, 'utf8'))
     } catch (error) {

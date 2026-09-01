@@ -153,14 +153,33 @@ export function analysisPrompt({
     return template.includes('{{instructions}}') ? filled : filled + alsoSection(review.instructions)
   }
 
-  const framing = `You are producing a structured code review of a pull request. Your output
+  const provenance =
+    target.kind === 'pr'
+      ? `PR #${target.number} in ${target.repo}`
+      : target.kind === 'worktree'
+        ? `Uncommitted work in the working tree, on ${target.baseRef}`
+        : `Local branch ${target.headRef}`
+
+  // What the checkout on disk is, relative to the diff, differs by mode: for a
+  // PR it is usually the base, but for uncommitted work it is the change
+  // itself. A model that assumes the wrong one reports a change as not made
+  // yet, or asks for a fix that is already sitting in front of it.
+  const checkout =
+    target.kind === 'worktree'
+      ? `You have the repo checked out at the current working directory, and it already
+contains this change — opening a changed file shows the new version, not the
+committed one. It is unfinished by definition, so say what is missing rather
+than what a reviewer should have caught.`
+      : 'You have the repo checked out at the current working directory.'
+
+  const framing = `You are producing a structured code review of ${target.kind === 'worktree' ? 'a change in progress' : 'a pull request'}. Your output
 is consumed by a viewer application, not read as prose.
 
 ## The change under review
 
 - Title: ${target.title}
 - Author: ${target.author}
-- ${target.kind === 'pr' ? `PR #${target.number} in ${target.repo}` : `Local branch ${target.headRef}`}
+- ${provenance}
 - Base: ${target.baseRef}
 
 The full unified diff is at \`${patchPath}\`. Read it.
@@ -169,10 +188,11 @@ The exact list of changed files, already parsed, is at \`${filesPath}\`. Every
 path you emit MUST come from that list, character for character. Never invent,
 abbreviate, or reconstruct a path.
 
-You have the repo checked out at the current working directory. Read beyond the
-diff whenever a judgment depends on it — callers of a changed method, the
-sibling implementation a new file should have matched, the factory a spec
-relies on. Use Grep to find callers before claiming a change breaks them.
+${checkout}
+
+Read beyond the diff whenever a judgment depends on it — callers of a changed
+method, the sibling implementation a new file should have matched, the factory
+a spec relies on. Use Grep to find callers before claiming a change breaks them.
 
 Let the diff decide what you open. Every read should be answering a question
 some line of this patch actually raised; a reviewer is waiting on this, so
