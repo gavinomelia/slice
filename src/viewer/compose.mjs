@@ -4,7 +4,7 @@
  * Drafts live beside the review in the cache, keyed the same way, so closing
  * the terminal mid-review does not lose them.
  */
-import { spawn } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -42,29 +42,6 @@ export const stripComments = (text) =>
     .filter((line) => !line.startsWith('#'))
     .join('\n')
     .trim()
-
-/**
- * Silence the parent's stdout for the duration of a callback.
- *
- * Ink does not stop rendering just because another program has the screen, and
- * the viewer is exactly as tall as the terminal — which puts Ink on its
- * clear-the-screen-and-repaint path, so any render at all while $EDITOR is up
- * blanks the editor and draws the viewer over it. The status-line timer alone
- * guarantees this: press `c` within a couple of seconds of any status message
- * and it expires while you are still typing.
- *
- * The editor inherits fd 1 directly, so muting the parent's stream stops Ink
- * without touching the editor.
- */
-async function muted(run) {
-  const write = process.stdout.write
-  process.stdout.write = () => true
-  try {
-    return await run()
-  } finally {
-    process.stdout.write = write
-  }
-}
 
 /**
  * Open $EDITOR on some seeded text and return what came back, comments
@@ -105,14 +82,8 @@ export async function composeInEditor({ seed, hint, context = [], redraw, onEmpt
   process.stdin.pause()
 
   try {
-    await muted(
-      () =>
-        new Promise((resolve, reject) => {
-          const child = spawn(bin, [...args, file], { stdio: 'inherit' })
-          child.on('error', reject)
-          child.on('close', resolve)
-        }),
-    )
+    const { error } = spawnSync(bin, [...args, file], { stdio: 'inherit' })
+    if (error) throw error
   } finally {
     process.stdin.resume()
     if (wasRaw) process.stdin.setRawMode(true)
