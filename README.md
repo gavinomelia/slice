@@ -3,113 +3,113 @@
 [![CI](https://github.com/gavinomelia/slice/actions/workflows/ci.yml/badge.svg)](https://github.com/gavinomelia/slice/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A terminal PR/diff viewer that groups changed files by behavioral slice
-(the migration, model, controller, view, and spec that make one feature
-work) instead of by directory. Optionally adds an AI-generated review:
-slices, a walkthrough of how the change works and why, and findings, with
-the ability to comment and post back to GitHub.
+Review pull requests in your terminal, one behavioral slice at a time.
 
-## Usage
+slice groups a diff by what each change does — the migration, model,
+controller, view, and spec that make one feature work — instead of by
+directory. Add `--ai` and Claude Code reads your repo to explain the change,
+walk you through it, and flag problems on the lines where they occur.
 
-```
-slice 1679        # browse the diff for PR #1679
-slice my-branch   # that branch's PR, or diff the branch if it has none
-slice             # the PR for the current branch, or the branch diff
-slice --branch    # local branch vs its base, before a PR exists
-slice -w          # what you have not committed yet (--wip)
-slice 1679 --ai   # add the AI-analyzed review: slices, walkthrough, findings
-slice -p "..."    # analyze, with something extra to say about how
-```
+![The overview of an AI-analyzed review](docs/screenshots/overview.png)
 
-By default slice just opens the diff — no model runs. Pass `--ai` for the
-analyzed review; once a review has been analyzed, running `slice` again
-reopens it without re-running the model. `--refresh` redoes it.
+## Why slice
 
-`-p "..."` adds a one-off note to the review prompt and implies `--ai`. For
-rules that should apply every time, put them in `.slice.jsonc` instead.
+- **Review work before it's pushed.** `slice -w` shows your uncommitted
+  changes and updates live as you or an agent edit, so you can review as the
+  work happens, not after a PR exists.
+- **The analysis sits next to the code.** Slices, a walkthrough, key
+  decisions, and findings appear beside the diff they describe. You never
+  have to switch between a chat window and the code.
+- **Keyboard first.** Every action is a key or two away: move between
+  slices, jump between findings, mark files read, switch to split view.
+- **Finish the review where you started it.** Comment on lines, then
+  approve, comment, or request changes, all posted to GitHub without
+  opening a browser.
 
-`slice -w` stays live: it watches the working tree and updates as files are
-edited, created, staged, or committed, keeping your place in the diff. It
-opens on a clean tree too, so it can sit beside an agent from the start.
-`r` reloads by hand.
+![A slice's diff with its findings](docs/screenshots/findings.png)
 
 ## Install
 
 ```
 npm install -g @gavinomelia/slice
+# or
+pnpm add -g @gavinomelia/slice
 ```
 
-Requires Node 20+, macOS or Linux, the [GitHub CLI](https://cli.github.com)
-(`gh`, authenticated), and [Claude Code](https://claude.com/claude-code)
-(`claude`) for `--ai`. No API key needed — analysis runs through your
-existing Claude Code session. Windows is not supported directly; it works
-under WSL.
+Requires Node 22+, macOS or Linux (Windows via WSL), and the
+[GitHub CLI](https://cli.github.com), authenticated. `--ai` also needs
+[Claude Code](https://claude.com/claude-code). No API key is needed: the
+analysis runs through your existing Claude Code session.
 
-## How the AI review works
+## Usage
 
-Claude Code reads your repo (read-only: `Read`, `Grep`, `Glob`) to produce
-the analysis, rather than working from the diff text alone, so it can
-follow callers, sibling implementations, and your own conventions
-(`.github/instructions/*.md`, `docs/CONVENTIONS.md`). Every finding is
-validated against the actual patch — a finding on a line or file outside
-the diff is dropped or demoted rather than trusted outright.
+```
+slice              # the PR for the current branch, or the branch diff
+slice 1679         # PR #1679
+slice my-branch    # that branch's PR, or the branch diff if it has none
+slice --branch     # the local branch against its base, ignoring any PR
+slice -w           # uncommitted work, updated live as files change
+slice --ai         # add the AI review: slices, walkthrough, findings
+slice -p "..."     # the AI review, with an extra instruction for this run
+```
 
-Because the diff is attacker-controlled input (it's someone else's PR), the
-analysis never gets write, execute, or network tools by default, and a
-repo's own config cannot widen its toolset — only yours can (see
-[Configuration](#configuration)).
+By default, slice opens the diff without running a model. Once `--ai` has
+analyzed a review, running `slice` again reopens that analysis.
+`--refresh` runs it again.
+
+![Uncommitted work in split view](docs/screenshots/wip.png)
 
 ## Keys
 
-| | |
+Press `?` in slice to see every key. The essentials:
+
+| Key | Action |
 |---|---|
 | `1` `2` `3` `tab` | focus slices / diff / findings |
-| `j` `k` `↑` `↓` | move within the focused panel |
-| `space` `b` | page within the focused panel |
-| `h` `l` `←` `→` | scroll the diff sideways, `0` back to the left |
-| `v` | switch the diff between unified and split |
-| `H` `L` | in split, which column `c` comments on |
-| `z` | zoom the diff to the full terminal |
+| `j` `k` `↑` `↓` | move; `space` `b` page |
+| `h` `l` `←` `→` | scroll the diff sideways; `0` back to the start |
 | `[` `]` | previous / next slice |
-| `n` `p` | next / previous finding, anywhere in the review |
-| `x` | mark the selected file — or whole slice — read, and move on |
-| `r` | reload the diff (`-w` only; it also reloads on its own) |
-| `y` `Y` | copy the findings here — or the whole review's — as a fix prompt |
-| `c` | comment on the diff's cursor line |
+| `n` `p` | next / previous finding |
+| `v` | toggle unified / split diff |
+| `z` | zoom the diff to full screen |
+| `x` | mark the file, or the whole slice, as read |
+| `c` | comment on the cursor line (`H` `L` pick the side in split view) |
 | `s` `A` `R` | submit as comment / approve / request changes |
-| `q` `ctrl-c` | quit |
+| `y` `Y` | copy findings here, or all of them, as a fix prompt |
+| `r` | reload (`-w`; it also reloads on its own) |
+| `?` | show all keys |
+| `q` | quit |
 
-`escape` dismisses the status line without quitting (so you don't lose
-unposted drafts). `c` opens `$EDITOR` to draft a line comment; `s`/`A`/`R`
-open `$EDITOR` for the review body and post the whole batch as one PR
-review — saving empty cancels. `y`/`Y` copy findings as a fix prompt (to
-`pbcopy`/`wl-copy`/`xclip`/`xsel`, or a file if none are available) to hand
-to any coding agent.
+`c`, `s`, `A`, and `R` open `$EDITOR`. Drafts are kept until you submit
+them, and saving an empty file cancels. `y` copies a prompt you can hand to
+any coding agent.
+
+## How the AI review works
+
+Claude Code reads your repo with read-only tools (`Read`, `Grep`, `Glob`),
+so it can follow callers and check your conventions
+(`.github/instructions/*.md`, `docs/CONVENTIONS.md`) rather than judging the
+diff in isolation. Each finding is checked against the patch. Findings that
+point outside the diff are dropped or demoted.
+
+A PR is someone else's input, so the analysis gets no write, execute, or
+network tools. A repo's config can't change that. Only your own config can.
 
 ## Configuration
 
 ```
-slice --init-config        # .slice.jsonc in the repo, how it reviews
-slice --init-config user   # ~/.config/slice/config.jsonc, how it looks
-slice --print-config       # the resolved result, and which files produced it
+slice --init-config        # .slice.jsonc in the repo: how code is reviewed
+slice --init-config user   # ~/.config/slice/config.jsonc: how slice looks
+slice --print-config       # the resolved config and where it came from
 ```
 
-How the code is reviewed belongs in the repo's `.slice.jsonc`; how the
-viewer looks, and what the AI is *allowed* to do, belong in your own
-`~/.config/slice/config.jsonc`. `--config <path>` replaces both layers.
-The format is JSONC (JSON with comments/trailing commas), not
-JavaScript — reviewing a PR means checking out its branch, and an
-executable config would let that branch run code.
-
 ```jsonc
-// .slice.jsonc — committed to the repo
+// .slice.jsonc — committed with the repo
 {
   "review": {
-    "slicing": "Treat anything under db/migrate as its own slice, always.",
-    "findings": { "append": "A controller action with no Pundit policy check is a bug, not a risk." },
+    "slicing": "Treat anything under db/migrate as its own slice.",
     "instructions": "Ignore anything under vendor/.",
-    "severities": { "nit": null },
-    "conventionFiles": ["docs/CONVENTIONS.md"]
+    "severities": { "nit": null }
   }
 }
 ```
@@ -117,53 +117,37 @@ executable config would let that branch run code.
 ```jsonc
 // ~/.config/slice/config.jsonc — yours only
 {
-  "review": {
-    "allowedTools": ["Read", "Grep", "Glob"],
-    "model": "opus",
-    "effort": "medium"   // low is the default and much faster
-  },
+  "review": { "model": "opus", "effort": "medium" },
   "theme": { "preset": "dark", "syntax": "tokyo-night" },
-  "layout": { "diffView": "unified", "treeWidth": 38 }
+  "layout": { "diffView": "split" }
 }
 ```
 
-For safety, a small set of settings (`allowedTools`, `promptFile`,
-`provider`, `model`, `effort`) can only be set in your own config, never
-the repo's — otherwise a PR could hand itself `Bash`/`Write` on your
-machine. slice warns if a repo tries.
+Config is JSONC rather than JavaScript, so checking out a branch can never
+run code. `allowedTools`, `promptFile`, `provider`, `model`, and `effort`
+are only read from your own config. slice warns if a repo tries to set them.
 
-## Caching
+## Cache
 
-Artifacts, drafts, and read marks are cached in
-`$XDG_CACHE_HOME/slice/<repo>/` (or `~/.cache/slice/`), outside the repo.
-`slice --clear-cache` drops it all. Reopen a cached review directly:
-
-```
-slice --open ~/.cache/slice/<repo>/pr-1692.review.json
-```
-
-## Layout
-
-```
-bin/slice.mjs           resolve target, capture patch, run analysis, open the viewer
-src/pipeline/           the only code that talks to gh, git, or the model
-src/viewer/             the terminal UI (ink)
-src/config/             defaults, presets, and the JSONC loader
-test/                   node:test, no dependencies
-```
+Patches, analyses, drafts, and read marks live in
+`$XDG_CACHE_HOME/slice/` (default `~/.cache/slice/`), never in the repo.
+`slice --clear-cache` removes them. `slice --open <file>.review.json`
+reopens a cached review without git or a model.
 
 ## Development
 
 ```
 npm install
-npm test                       # node:test, no dependencies
-npm run format                 # prettier
-node bin/slice.mjs --open <review.json>
+npm test          # node:test
+npm run format    # prettier
 ```
 
-`SLICE_DEBUG=1` keeps the stack trace on an unexpected failure. See
-[CONTRIBUTING.md](CONTRIBUTING.md) for how the pieces are tested.
+`bin/slice.mjs` resolves the target and runs the analysis,
+`src/pipeline/` is the only code that talks to `gh`, `git`, or the model,
+`src/viewer/` is the terminal UI ([Ink](https://github.com/vadimdemedes/ink)),
+and `src/config/` holds the defaults, themes, and config loader. Set
+`SLICE_DEBUG=1` to see stack traces.
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT
