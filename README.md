@@ -32,7 +32,9 @@ walk you through it, and flag problems on the lines where they occur.
 
 ```
 npm install -g @gavinomelia/slice
-# or
+```
+
+```
 pnpm add -g @gavinomelia/slice
 ```
 
