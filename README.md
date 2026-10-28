@@ -16,8 +16,8 @@ slice 1679        # browse the diff for PR #1679
 slice my-branch   # that branch's PR, or diff the branch if it has none
 slice             # the PR for the current branch, or the branch diff
 slice --branch    # local branch vs its base, before a PR exists
-slice --wip       # what you have not committed yet
-slice 1679 --ai   # add the AI-analyzed review: slices, summaries, findings
+slice -w          # what you have not committed yet (--wip)
+slice 1679 --ai   # add the AI-analyzed review: slices, walkthrough, findings
 slice -p "..."    # analyze, with something extra to say about how
 ```
 

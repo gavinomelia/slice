@@ -245,6 +245,7 @@ test('--wip refuses the flags it would otherwise have to ignore', () => {
   writeFileSync(join(dir, 'a.rb'), 'changed\n')
 
   assert.match(sliceIn(dir, '--wip', '--branch').stderr, /--wip and --branch are different diffs/)
+  assert.match(sliceIn(dir, '-w', '--branch').stderr, /--wip and --branch are different diffs/, '-w is --wip')
   assert.match(sliceIn(dir, '--wip', 'some-branch').stderr, /takes no PR number or branch \(got "some-branch"\)/)
   assert.match(sliceIn(dir, '--wip', '--base', 'main').stderr, /--base belongs to --branch/)
   for (const args of [

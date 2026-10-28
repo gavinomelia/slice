@@ -29,7 +29,7 @@ Usage:
   slice 1679         review PR #1679
   slice my-branch    review that branch's PR, or diff the branch if it has none
   slice --branch     review the local branch diff, ignoring any open PR
-  slice --wip        review what you have not committed yet
+  slice -w           review what you have not committed yet
 
   By default this just opens the diff in the viewer — no model runs. Pass
   --ai for the AI-analyzed review: slices, a walkthrough, and findings. Once one
@@ -40,7 +40,7 @@ Options:
   -p, --prompt <t>  add instructions to the review prompt (implies --ai);
                     repeatable — slice -p "review for security in particular"
   --branch          diff the local branch against its base instead of a PR
-  --wip             diff the working tree: staged, unstaged, and untracked
+  -w, --wip         diff the working tree: staged, unstaged, and untracked
   --base <ref>      base ref for --branch mode (default: the repo default branch)
   --refresh         re-run the analysis even if a cached one exists (implies --ai)
   --open <file>     open a cached review.json without touching git or the model
@@ -145,7 +145,7 @@ function parseArgs(argv) {
       // one — otherwise `--init-config 1679` would eat the PR number.
       options.initConfig = ['repo', 'user'].includes(argv[i + 1]) ? argv[++i] : 'repo'
     } else if (arg === '--branch') options.branch = true
-    else if (arg === '--wip') options.wip = true
+    else if (arg === '-w' || arg === '--wip') options.wip = true
     else if (arg === '--refresh') options.refresh = true
     else if (arg === '-a' || arg === '--ai') options.analyze = true
     else if (arg === '-p' || arg === '--prompt') {
