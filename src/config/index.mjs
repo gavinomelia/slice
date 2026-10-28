@@ -284,16 +284,17 @@ function unknownKeys(patch, path) {
  * `{ preset: "light", ui: { accent: "magenta" } }` — the last of which is what
  * almost everyone actually wants.
  */
-export function resolveTheme(theme, background = null) {
+export function resolveTheme(theme, background = null, foreground = null) {
   const presetFor = (name) =>
     name === 'auto' ? THEMES[background && isLight(background) ? 'light' : 'dark'] : THEMES[name]
 
-  if (typeof theme === 'string') return adaptToBackground(presetFor(theme) ?? THEMES[DEFAULT_THEME_NAME], background)
-  if (!isPlainObject(theme)) return adaptToBackground(THEMES[DEFAULT_THEME_NAME], background)
+  if (typeof theme === 'string')
+    return adaptToBackground(presetFor(theme) ?? THEMES[DEFAULT_THEME_NAME], background, foreground)
+  if (!isPlainObject(theme)) return adaptToBackground(THEMES[DEFAULT_THEME_NAME], background, foreground)
 
   const { preset, ...overrides } = theme
   const base = presetFor(preset) ?? THEMES[DEFAULT_THEME_NAME]
-  return adaptToBackground(mergePatch(base, overrides), background)
+  return adaptToBackground(mergePatch(base, overrides), background, foreground)
 }
 
 /**

@@ -38,10 +38,12 @@ const USER = `// How slice looks and runs, for you, in every repo.
   // "auto" (dark or light to match your terminal), "dark", "light", or a preset plus overrides.
   "theme": {
     "preset": "auto"
-    // Asked of the terminal at startup; this is only used if it does not answer.
+    // Asked of the terminal at startup; these are only used if it does not answer.
     // "background": "#1e1e2e",
+    // "foreground": "#cdd6f4",
     // Diff highlights are your add/remove colours laid over the background.
     // "diff": { "opacity": { "line": 0.14, "word": 0.3 } },
+    // "ansi" colours code with your terminal's palette; any Shiki theme id works too.
     // "syntax": "tokyo-night",
     // "ui": { "accent": "magenta", "borderFocus": "magenta" }
   },

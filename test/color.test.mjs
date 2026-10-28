@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { adaptToBackground, blend, isLight, parseHex, toHex } from '../src/config/color.mjs'
+import { adaptToBackground, blend, isLight, luminance, parseHex, toHex } from '../src/config/color.mjs'
 import { resolveTheme, THEMES } from '../src/config/index.mjs'
-import { parseBackground } from '../src/viewer/terminal.mjs'
+import { ANSI_THEME, terminalColor } from '../src/viewer/ansi.mjs'
+import { parseColors } from '../src/viewer/terminal.mjs'
 
 const slate = { r: 0x2b, g: 0x31, b: 0x3a }
 const white = { r: 255, g: 255, b: 255 }
@@ -38,15 +39,54 @@ test('without a background, or with opacity turned off, the fixed colours stand'
 test('auto picks the preset that matches the terminal', () => {
   assert.ok(isLight(white))
   assert.ok(!isLight(slate))
-  assert.equal(resolveTheme('auto', white).syntax, 'pierre-light')
-  assert.equal(resolveTheme('auto', slate).syntax, 'pierre-dark')
-  assert.equal(resolveTheme('auto', null).syntax, 'pierre-dark', 'no answer falls back to dark')
+  assert.equal(resolveTheme('auto', white).diff.addTint, THEMES.light.diff.addTint)
+  assert.equal(resolveTheme('auto', slate).diff.addTint, THEMES.dark.diff.addTint)
+  assert.equal(resolveTheme('auto', null).diff.addTint, THEMES.dark.diff.addTint, 'no answer falls back to dark')
   assert.equal(resolveTheme({ preset: 'auto', ui: { accent: 'magenta' } }, white).ui.accent, 'magenta')
 })
 
 test('terminal replies parse in every width xterm allows, with either terminator', () => {
-  assert.deepEqual(parseBackground('\x1b]11;rgb:2b2b/3131/3a3a\x1b\\\x1b[?62;22c'), slate)
-  assert.deepEqual(parseBackground('\x1b]11;rgb:2b/31/3a\x07'), slate)
-  assert.deepEqual(parseBackground('\x1b]11;rgba:ffff/ffff/ffff/ffff\x07'), white)
-  assert.equal(parseBackground('\x1b[?62;22c'), null, 'a terminal that ignores the query')
+  assert.deepEqual(parseColors('\x1b]10;rgb:ffff/ffff/ffff\x1b\\\x1b]11;rgb:2b2b/3131/3a3a\x1b\\\x1b[?62;22c'), {
+    foreground: white,
+    background: slate,
+  })
+  assert.deepEqual(parseColors('\x1b]11;rgb:2b/31/3a\x07').background, slate)
+  assert.deepEqual(parseColors('\x1b]11;rgba:ffff/ffff/ffff/ffff\x07').background, white)
+  assert.deepEqual(parseColors('\x1b[?62;22c'), { foreground: null, background: null }, 'a terminal that ignores both')
+})
+
+const contrast = (a, b) => {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x)
+  return (hi + 0.05) / (lo + 0.05)
+}
+
+const omarchy = {
+  'catppuccin-latte': '#eff1f5',
+  'rose-pine': '#faf4ed',
+  'flexoki-light': '#FFFCF0',
+  white: '#ffffff',
+  everforest: '#2d353b',
+  'tokyo-night': '#1a1b26',
+}
+
+for (const [name, bg] of Object.entries(omarchy)) {
+  test(`on ${name}, text comes from the terminal palette and tints stay a wash`, () => {
+    const theme = resolveTheme('auto', parseHex(bg))
+    assert.equal(theme.syntax, 'ansi')
+    assert.equal(theme.ui.muted, 'gray')
+    assert.equal(theme.diff.addMark, 'green')
+    for (const key of ['addBg', 'delBg']) {
+      assert.ok(
+        contrast(parseHex(theme.diff[key]), parseHex(bg)) < 1.35,
+        `${key} ${theme.diff[key]} is subtle on ${bg}`,
+      )
+    }
+  })
+}
+
+test('the ansi syntax theme only ever hands out palette names', () => {
+  const colors = new Set(ANSI_THEME.tokenColors.map((rule) => terminalColor(rule.settings.foreground)))
+  for (const color of colors) assert.ok(color === undefined || /^[a-z]+$/.test(color), String(color))
+  assert.equal(terminalColor('#A00004'), 'blue')
+  assert.equal(terminalColor('#3fb950'), '#3fb950', 'a real hex from another theme passes through')
 })

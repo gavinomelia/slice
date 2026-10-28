@@ -21,6 +21,8 @@ import {
   renderDiffWithHighlighter,
 } from '@pierre/diffs'
 
+import { terminalColor } from './ansi.mjs'
+
 /**
  * Expand tabs against the running column, not per-segment.
  *
@@ -71,7 +73,7 @@ function lineToSegments(node, tabWidth) {
     const style = n.properties?.style
     if (typeof style === 'string') {
       const match = /color:\s*(#[0-9a-fA-F]{6})/.exec(style)
-      if (match) nextColor = match[1]
+      if (match) nextColor = terminalColor(match[1])
     }
     if (n.properties?.['data-diff-span'] !== undefined) nextWord = true
 
@@ -130,7 +132,7 @@ export async function codeHighlighter(theme = DEFAULT_THEMES.dark) {
     if (!use) return null
     try {
       const { tokens } = hl.codeToTokens(code, { lang: use, theme })
-      return tokens.map((line) => line.map((token) => ({ text: token.content, color: token.color })))
+      return tokens.map((line) => line.map((token) => ({ text: token.content, color: terminalColor(token.color) })))
     } catch {
       return null
     }

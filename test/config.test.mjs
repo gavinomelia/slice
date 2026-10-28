@@ -68,8 +68,8 @@ test('a patch never mutates the object it was applied to', () => {
 })
 
 test('resolveTheme accepts a name, an object, or a preset plus overrides', () => {
-  assert.equal(resolveTheme('light').syntax, 'pierre-light')
-  assert.equal(resolveTheme('nonsense').syntax, 'pierre-dark', 'an unknown preset falls back')
+  assert.equal(resolveTheme('light').diff.addTint, '#1a7f37')
+  assert.equal(resolveTheme('nonsense').diff.addTint, '#3fb950', 'an unknown preset falls back')
   assert.equal(resolveTheme({ preset: 'light', ui: { accent: 'magenta' } }).ui.accent, 'magenta')
   assert.equal(
     resolveTheme({ preset: 'light', ui: { accent: 'magenta' } }).diff.addBg,

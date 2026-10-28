@@ -30,7 +30,7 @@ import { handOff } from './handoff.mjs'
 import { buildTree, cellAt, draftKey, rowHasLine, sideAt, windowFor } from './tree.mjs'
 import { loadReviewed, nextUnreviewed, pathsForRow, saveReviewed, sliceReviewed, toggleReviewed } from './progress.mjs'
 import { parseHex } from '../config/color.mjs'
-import { queryBackground } from './terminal.mjs'
+import { queryColors } from './terminal.mjs'
 import { viewerConfig } from './theme.mjs'
 
 const PANES = ['tree', 'diff', 'findings']
@@ -292,7 +292,7 @@ function Pane({ title, number, focused, width, theme, total, top, height, childr
       Text,
       { bold: true, wrap: 'truncate-middle' },
       h(Text, { color: edge }, `${number} `),
-      h(Text, { color: edge, dimColor: !focused }, title),
+      h(Text, { color: focused ? edge : theme.ui.muted }, title),
     ),
     h(
       Box,
@@ -987,7 +987,7 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
     const label = ` ${row.text} `
     return h(
       Text,
-      { key: index, wrap: 'truncate', color: theme.diff.hunk, dimColor: true },
+      { key: index, wrap: 'truncate', color: theme.diff.hunk },
       `  ${label}${'─'.repeat(Math.max(0, inner(diffWidth) - label.length - 3))}`,
     )
   }
@@ -1039,7 +1039,6 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
           color: theme.diff.lineNumber,
           backgroundColor: lineBg,
           inverse: selected,
-          dimColor: !selected,
         },
         String(line ?? '').padStart(5) + ' ',
       ),
@@ -1196,7 +1195,7 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
                     color: selected ? theme.ui.accent : (ui.sliceKind(s.kind).color ?? undefined),
                   },
                   `${row.sliceIndex + 1} `,
-                  h(Text, { color: done ? theme.ui.reviewed : undefined }, done ? '✓' : '·'),
+                  h(Text, { color: done && !selected ? theme.ui.reviewed : undefined }, done ? '✓' : '·'),
                   ` ${s.title}`,
                 )
               }
@@ -1204,15 +1203,16 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
               const fileFindings = findingsFor(review, row.path)
               const read = reviewed.has(row.path)
               const status = ui.fileStatus(review.files[row.path]?.status)
+              const tone = (color) => (selected ? theme.ui.accent : color)
               return h(
                 Text,
                 base,
                 // A leading mark column, the way the diff pane carries one for
                 // the cursor: a check has to sit where the eye can run down it,
                 // not after a filename of unpredictable length.
-                h(Text, { color: theme.ui.reviewed, bold: true }, read ? '✓' : ' '),
-                h(Text, { color: theme.ui.border, dimColor: true }, row.last ? '└ ' : '├ '),
-                h(Text, { color: status.color }, `${status.glyph} `),
+                h(Text, { color: tone(theme.ui.reviewed), bold: true }, read ? '✓' : ' '),
+                h(Text, { color: tone(theme.ui.border) }, row.last ? '└ ' : '├ '),
+                h(Text, { color: tone(status.color) }, `${status.glyph} `),
                 // Read files recede, but their findings do not — a file you
                 // have already looked at can still be the one with the bug.
                 h(
@@ -1221,7 +1221,7 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
                   row.path.split('/').pop(),
                 ),
                 ...severityGlyphs(fileFindings, ui, 3).map((segment, j) =>
-                  h(Text, { key: j, color: segment.color }, j === 0 ? ` ${segment.text}` : segment.text),
+                  h(Text, { key: j, color: tone(segment.color) }, j === 0 ? ` ${segment.text}` : segment.text),
                 ),
               )
             }),
@@ -1313,8 +1313,10 @@ export async function runViewer({
     return
   }
 
-  const background = (await queryBackground()) ?? parseHex(config?.theme?.background)
-  const ui = viewerConfig({ review, cwd: repoRoot, config, warnings, background })
+  const answered = await queryColors()
+  const background = answered.background ?? parseHex(config?.theme?.background)
+  const foreground = answered.foreground ?? parseHex(config?.theme?.foreground)
+  const ui = viewerConfig({ review, cwd: repoRoot, config, warnings, background, foreground })
   ui.syntax = await resolveSyntaxTheme(ui.theme.syntax)
   setMarkdownTheme(ui.theme.markdown)
 

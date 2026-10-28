@@ -25,6 +25,7 @@ export function viewerConfig({
   config: resolved = null,
   warnings: given = [],
   background = null,
+  foreground = null,
 }) {
   let config = resolved
   // Anything the CLI printed before the viewer started is gone the moment the
@@ -56,7 +57,7 @@ export function viewerConfig({
 
   // Unlike the taxonomies, a file's status comes from the patch rather than the
   // analysis, so it is appearance all the way down and belongs to the theme.
-  const theme = resolveTheme(config.theme, background)
+  const theme = resolveTheme(config.theme, background, foreground)
 
   return {
     theme,

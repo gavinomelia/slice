@@ -30,12 +30,14 @@ export function luminance({ r, g, b }) {
 
 export const isLight = (color) => luminance(color) > 0.4
 
-export function adaptToBackground(theme, background) {
+export function adaptToBackground(theme, background, foreground = null) {
   if (!background) return theme
+  const text = foreground ?? (isLight(background) ? { r: 0, g: 0, b: 0 } : { r: 255, g: 255, b: 255 })
   const diff = { ...theme.diff }
+  const markdown = { ...theme.markdown }
   const opacity = diff.opacity
-  const add = parseHex(diff.addMark)
-  const del = parseHex(diff.delMark)
+  const add = parseHex(diff.addTint)
+  const del = parseHex(diff.delTint)
 
   if (opacity && add && del) {
     const tint = (color, alpha) => toHex(blend(background, color, alpha))
@@ -45,10 +47,8 @@ export function adaptToBackground(theme, background) {
     diff.delWordBg = tint(del, opacity.word)
   }
 
-  const markdown = { ...theme.markdown }
-  if (theme.markdown?.codeBgOpacity) {
-    const contrast = isLight(background) ? { r: 0, g: 0, b: 0 } : { r: 255, g: 255, b: 255 }
-    markdown.codeBg = toHex(blend(background, contrast, theme.markdown.codeBgOpacity))
+  if (markdown.codeBgOpacity) {
+    markdown.codeBg = toHex(blend(background, text, markdown.codeBgOpacity))
   }
 
   return { ...theme, diff, markdown }

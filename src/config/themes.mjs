@@ -19,7 +19,7 @@ const dark = {
    * @pierre/diffs. Both viewers highlight from the same tokens, so this is the
    * one setting that changes the code itself rather than the chrome.
    */
-  syntax: 'pierre-dark',
+  syntax: 'ansi',
 
   diff: {
     addBg: '#0d1f15',
@@ -29,8 +29,10 @@ const dark = {
     addWordBg: '#173a24',
     delWordBg: '#46201f',
     opacity: { line: 0.14, word: 0.3 },
-    addMark: '#3fb950',
-    delMark: '#f85149',
+    addTint: '#3fb950',
+    delTint: '#f85149',
+    addMark: 'green',
+    delMark: 'red',
     lineNumber: 'gray',
     hunk: 'gray',
   },
@@ -55,8 +57,8 @@ const dark = {
    * new file reads as new in both places.
    */
   fileStatus: {
-    added: { glyph: '+', color: '#3fb950' },
-    deleted: { glyph: '-', color: '#f85149' },
+    added: { glyph: '+', color: 'green' },
+    deleted: { glyph: '-', color: 'red' },
     renamed: { glyph: '→', color: 'cyan' },
     binary: { glyph: '◆', color: 'gray' },
     modified: { glyph: ' ', color: null },
@@ -81,7 +83,7 @@ const dark = {
  * tuned for exactly this.
  */
 const light = {
-  syntax: 'pierre-light',
+  syntax: 'ansi',
 
   diff: {
     addBg: '#dafbe1',
@@ -90,8 +92,10 @@ const light = {
     addWordBg: '#aceebb',
     delWordBg: '#ffc1bc',
     opacity: { line: 0.14, word: 0.3 },
-    addMark: '#1a7f37',
-    delMark: '#cf222e',
+    addTint: '#1a7f37',
+    delTint: '#cf222e',
+    addMark: 'green',
+    delMark: 'red',
     lineNumber: 'gray',
     hunk: 'gray',
   },
@@ -110,8 +114,8 @@ const light = {
   },
 
   fileStatus: {
-    added: { glyph: '+', color: '#1a7f37' },
-    deleted: { glyph: '-', color: '#cf222e' },
+    added: { glyph: '+', color: 'green' },
+    deleted: { glyph: '-', color: 'red' },
     renamed: { glyph: '→', color: 'blue' },
     binary: { glyph: '◆', color: 'gray' },
     modified: { glyph: ' ', color: null },
