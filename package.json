@@ -22,7 +22,7 @@
   "bugs": "https://github.com/gavinomelia/slice/issues",
   "type": "module",
   "bin": {
-    "slice": "./bin/slice.mjs"
+    "slice": "bin/slice.mjs"
   },
   "exports": {
     ".": "./src/viewer/app.mjs",
