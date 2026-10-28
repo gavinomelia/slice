@@ -13,9 +13,14 @@
     "claude"
   ],
   "license": "MIT",
-  "author": "Gavin OMelia",
+  "author": "Gavin O'Melia",
+  "homepage": "https://github.com/gavinomelia/slice#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gavinomelia/slice.git"
+  },
+  "bugs": "https://github.com/gavinomelia/slice/issues",
   "type": "module",
-  "private": true,
   "bin": {
     "slice": "./bin/slice.mjs"
   },
@@ -34,6 +39,9 @@
     "darwin",
     "linux"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=22"
   },
