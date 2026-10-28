@@ -205,3 +205,57 @@ export function findingLines(findings, active, width, ui) {
 
   return { lines, starts }
 }
+
+const KEY_GROUPS = [
+  [
+    'MOVE',
+    [
+      ['1 2 3  tab', 'focus slices / diff / findings'],
+      ['j k  ↑ ↓', 'move within the focused pane'],
+      ['space  b', 'page down / up'],
+      ['[  ]', 'previous / next slice'],
+      ['n  p', 'next / previous finding'],
+    ],
+  ],
+  [
+    'DIFF',
+    [
+      ['h l  ← →', 'scroll sideways, 0 back to the start'],
+      ['v', 'switch between unified and split'],
+      ['H  L', 'in split, the side c comments on'],
+      ['z', 'zoom the diff to the full terminal'],
+    ],
+  ],
+  [
+    'REVIEW',
+    [
+      ['x', 'mark the file, or the whole slice, read'],
+      ['c', 'comment on the cursor line in $EDITOR'],
+      ['s  A  R', 'submit as comment / approve / request changes'],
+      ['y  Y', 'copy findings here, or all of them, as a fix prompt'],
+      ['r', 'reload the diff (-w)'],
+    ],
+  ],
+  [
+    'GENERAL',
+    [
+      ['?', 'show or hide this'],
+      ['esc', 'dismiss the status line'],
+      ['q  ctrl-c', 'quit'],
+    ],
+  ],
+]
+
+export function keysCard(width, ui) {
+  const column = Math.max(...KEY_GROUPS.flatMap(([, keys]) => keys.map(([key]) => key.length))) + 3
+  return KEY_GROUPS.flatMap(([heading, keys], i) => [
+    ...(i > 0 ? [[]] : []),
+    plain(heading, { color: ui.theme.ui.heading, bold: true }),
+    ...keys.flatMap(([key, action]) =>
+      wrapSegments([{ text: action }], width - column).map((line, j) => [
+        { text: (j === 0 ? key : '').padEnd(column), color: ui.theme.ui.accent, bold: true },
+        ...line,
+      ]),
+    ),
+  ])
+}

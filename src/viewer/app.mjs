@@ -13,7 +13,7 @@ import { Box, Text, render, useApp, useInput, useStdout } from 'ink'
 
 import { buildRows, codeHighlighter, resolveSyntaxTheme, splitRows } from './render.mjs'
 import { padSegments, plain, segmentsWidth, setCodeHighlighter, setMarkdownTheme, sliceSegments } from './markdown.mjs'
-import { draftsCard, findingLines, findingsFor, overviewCard, severityGlyphs, sliceCard } from './cards.mjs'
+import { draftsCard, findingLines, findingsFor, keysCard, overviewCard, severityGlyphs, sliceCard } from './cards.mjs'
 import { composeInEditor, loadDrafts, saveDrafts, seedFromFinding } from './compose.mjs'
 import { partitionDrafts, postReview } from './github.mjs'
 import { handOff } from './handoff.mjs'
@@ -148,6 +148,7 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
   const [focus, setFocus] = useState('tree')
   const [findScroll, setFindScroll] = useState(0)
   const [zoomed, setZoomed] = useState(false)
+  const [showKeys, setShowKeys] = useState(false)
   const [split, setSplit] = useState(layout.diffView === 'split')
   // Which column of a split row `c` and the cursor mark mean. Additions by
   // default: the right-hand side is the code that will exist after the merge,
@@ -359,11 +360,12 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
   const codeWidth = Math.max(8, (split ? halfWidth : inner(diffWidth)) - 8)
 
   const centre = useMemo(() => {
+    if (showKeys) return keysCard(inner(diffWidth), ui)
     if (current?.type === 'overview') return overviewCard(review, inner(diffWidth), ui)
     if (current?.type === 'slice') return sliceCard(review, slice, reviewed, inner(diffWidth), ui)
     if (current?.type === 'drafts') return draftsCard(review, drafts, inner(diffWidth), ui)
     return null
-  }, [review, current, slice, drafts, reviewed, diffWidth, ui])
+  }, [showKeys, review, current, slice, drafts, reviewed, diffWidth, ui])
 
   const draftAt = useMemo(() => {
     const index = new Map()
@@ -669,8 +671,10 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
     // Escape used to quit, sharing that with `q`. It is the key people press to
     // back out of something, and here it threw away a session with unposted
     // drafts in it — so it dismisses the status line and nothing more.
-    if (key.escape) return setStatus(null)
     if (input === 'q' || (key.ctrl && input === 'c')) return exit()
+    if (showKeys) return setShowKeys(false)
+    if (input === '?') return setShowKeys(true)
+    if (key.escape) return setStatus(null)
 
     if (input === 'c') return void commentOnCursor().catch((e) => setStatus({ tone: theme.risk.high, text: e.message }))
     // Bound regardless of which pane has focus: it acts on what the tree has
@@ -742,9 +746,11 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
   }
 
   const treeTop = windowFor(treeIndex, tree.length, bodyHeight)
-  const centreTop = centre
-    ? Math.min(scroll, Math.max(0, centre.length - bodyHeight))
-    : windowFor(cursor, view.length, bodyHeight)
+  const centreTop = showKeys
+    ? 0
+    : centre
+      ? Math.min(scroll, Math.max(0, centre.length - bodyHeight))
+      : windowFor(cursor, view.length, bodyHeight)
 
   const foundTop = Math.max(0, Math.min(findScroll, Math.max(0, found.lines.length - bodyHeight)))
 
@@ -876,11 +882,11 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
   // not. Split spends its spare room teaching H/L, since two columns are the
   // only place a side to choose exists.
   const KEYS = {
-    tree: `[j/k] move  [[/]] slice  [x] read  [y] fix  [tab] pane  [n/p] finding${reload ? '  [r] reload' : ''}  [q] quit`,
+    tree: `[j/k] move  [[/]] slice  [x] read  [y] fix  [tab] pane  [n/p] finding${reload ? '  [r] reload' : ''}  [?] keys  [q] quit`,
     diff: split
-      ? '[j/k] line  [H/L] side  [h/l] scroll  [v] unified  [c] comment  [x] read  [s/A/R] submit'
-      : '[j/k] line  [h/l] scroll  [v] split  [z] zoom  [c] comment  [x] read  [s/A/R] submit',
-    findings: '[j/k] scroll  [n/p] finding  [c] comment  [y] fix  [x] read  [tab] pane  [q] quit',
+      ? '[j/k] line  [H/L] side  [h/l] scroll  [v] unified  [c] comment  [x] read  [s/A/R] submit  [?] keys'
+      : '[j/k] line  [h/l] scroll  [v] split  [z] zoom  [c] comment  [x] read  [s/A/R] submit  [?] keys',
+    findings: '[j/k] scroll  [n/p] finding  [c] comment  [y] fix  [x] read  [tab] pane  [?] keys  [q] quit',
   }
 
   return h(
@@ -1015,7 +1021,7 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
       h(
         Pane,
         {
-          title: centreTitle,
+          title: showKeys ? 'KEYS' : centreTitle,
           number: 2,
           focused: focus === 'diff',
           width: diffWidth,
