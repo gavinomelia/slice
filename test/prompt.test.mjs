@@ -20,6 +20,13 @@ test('the default prompt names the patch, the file list, and the schema', () => 
   assert.match(prompt, /PR #7 in o\/r/)
 })
 
+test('the default prompt asks for a walkthrough and the decisions behind it', () => {
+  const prompt = build()
+  assert.match(prompt, /Walk through the change/)
+  assert.match(prompt, /"walkthrough": \[/)
+  assert.match(prompt, /"decisions": \[/)
+})
+
 test('conventions appear only when there are convention files', () => {
   assert.ok(!build().includes('Project conventions'))
   assert.match(build(DEFAULT_CONFIG, ['docs/C.md']), /docs\/C\.md/)
@@ -73,6 +80,7 @@ test('the output schema is always present, whatever is overridden', () => {
     review: {
       slicing: { replace: 'x' },
       summaries: { replace: 'x' },
+      walkthrough: { replace: 'x' },
       findings: { replace: 'x' },
       anchoring: { replace: 'x' },
     },

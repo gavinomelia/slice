@@ -62,6 +62,7 @@ export const DEFAULT_CONFIG = {
     conventions: '',
     slicing: '',
     summaries: '',
+    walkthrough: '',
     findings: '',
     anchoring: '',
 

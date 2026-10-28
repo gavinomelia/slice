@@ -55,7 +55,33 @@ Word counts are ceilings. Going over is a failure; coming in well under is not.
   archived scope and its index", not "This file adds…". Omit \"skim\" slices.
 `
 
-const findingsSection = (severities) => `## Step 3: Report findings
+const WALKTHROUGH = `## Step 3: Walk through the change
+
+The reviewer will not read every line. The walkthrough is how they understand
+the change without doing so: what happens now, in the order it happens, and the
+choices behind it. Summarising the diff is the point here, unlike elsewhere —
+but describe, do not judge. Problems go in findings.
+
+- \`walkthrough[]\`: 3–8 steps, in the order things happen — from what a user,
+  caller, or job does, through each piece of code it reaches, to the result.
+  Not file order and not slice order. For a change with no runtime flow (a
+  refactor, docs, config), walk the structure instead: what was there, what
+  replaced it, what now depends on it.
+  - \`title\`: 8 words. The step as an event: "Reviewer marks a file read".
+  - \`body\`: 45 words. What happens at this step and which code does it. Name
+    functions here — this is where the reader maps behavior onto code.
+  - \`paths\`: the files doing the work at this step.
+- \`decisions[]\`: up to 5. Choices a reviewer would want to agree with: an
+  approach taken where another was plausible, a trade-off accepted, a
+  constraint worked around. Skip anything with only one sensible option.
+  - \`title\`: 10 words. The choice, stated: "Read marks cached outside the
+    repo".
+  - \`why\`: 35 words. What it buys, what it costs, and the alternative it
+    rules out. If nothing in the change says why, infer it and say so.
+  - \`paths\`: where the choice is made.
+`
+
+const findingsSection = (severities) => `## Step 4: Report findings
 
 Report only real problems. Available severities:
 
@@ -95,6 +121,8 @@ before or after it, no code fence. It must match this shape exactly:
       "summary": "...", "paths": ["exact/path/from/files.json"] }
   ],
   "notes": [ { "path": "exact/path", "summary": "..." } ],
+  "walkthrough": [ { "title": "...", "body": "...", "paths": ["exact/path"] } ],
+  "decisions": [ { "title": "...", "why": "...", "paths": ["exact/path"] } ],
   "findings": [
     { "severity": "${enumList(severities)}",
       "confidence": "confirmed|suspected",
@@ -225,6 +253,7 @@ sentence budgets below are limits, not targets — come in under them.
     promptSection(review.conventions, conventionsSection(conventionFiles)),
     promptSection(review.slicing, slicingSection(sliceKinds)),
     promptSection(review.summaries, SUMMARIES),
+    promptSection(review.walkthrough, WALKTHROUGH),
     promptSection(review.findings, findingsSection(severities)),
     promptSection(review.anchoring, ANCHORING),
     schema,

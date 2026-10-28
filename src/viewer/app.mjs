@@ -141,7 +141,48 @@ function overviewCard(review, width, ui) {
     ...markdownLines(overview.assessment, width),
     [],
     plain(`risk: ${overview.risk}`, { color: ui.theme.risk[overview.risk] ?? ui.theme.ui.muted, bold: true }),
+    ...walkthroughLines(review.walkthrough ?? [], width, ui),
+    ...decisionLines(review.decisions ?? [], width, ui),
   ]
+}
+
+function pathLines(paths, width, ui) {
+  return paths.flatMap((path) => wrapSegments([{ text: path, color: ui.theme.ui.muted }], width))
+}
+
+function walkthroughLines(steps, width, ui) {
+  if (steps.length === 0) return []
+  const lines = [[], plain('WALKTHROUGH', { color: ui.theme.ui.heading, bold: true })]
+  steps.forEach((step, index) => {
+    const number = `${index + 1}. `
+    lines.push(
+      [],
+      ...wrapSegments(parseInline(step.title, { bold: true }), width - number.length).map((line, i) => [
+        { text: i === 0 ? number : ' '.repeat(number.length), color: ui.theme.ui.accent, bold: true },
+        ...line,
+      ]),
+      ...indentLines(markdownLines(step.body, width - number.length), number.length),
+      ...indentLines(pathLines(step.paths, width - number.length, ui), number.length),
+    )
+  })
+  return lines
+}
+
+function decisionLines(decisions, width, ui) {
+  if (decisions.length === 0) return []
+  const lines = [[], plain('DECISIONS', { color: ui.theme.ui.heading, bold: true })]
+  for (const decision of decisions) {
+    lines.push(
+      [],
+      ...wrapSegments(parseInline(decision.title, { bold: true }), width - 2).map((line, i) => [
+        { text: i === 0 ? '◇ ' : '  ', color: ui.theme.ui.accent },
+        ...line,
+      ]),
+      ...indentLines(markdownLines(decision.why, width - 2), 2),
+      ...indentLines(pathLines(decision.paths, width - 2, ui), 2),
+    )
+  }
+  return lines
 }
 
 /**

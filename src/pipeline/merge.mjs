@@ -137,6 +137,29 @@ export function mergeReview({ target, files, analysis, config = DEFAULT_CONFIG }
     if (note?.path && byPath.has(note.path)) notes[note.path] = String(note.summary ?? '')
   }
 
+  const knownPaths = (entry, label) =>
+    (Array.isArray(entry?.paths) ? entry.paths : []).filter((path) => {
+      if (byPath.has(path)) return true
+      warnings.push(`${label} "${entry?.title}" referenced unknown path ${path}`)
+      return false
+    })
+
+  const walkthrough = (Array.isArray(analysis?.walkthrough) ? analysis.walkthrough : [])
+    .filter((step) => step?.title || step?.body)
+    .map((step) => ({
+      title: String(step.title ?? ''),
+      body: String(step.body ?? ''),
+      paths: knownPaths(step, 'walkthrough step'),
+    }))
+
+  const decisions = (Array.isArray(analysis?.decisions) ? analysis.decisions : [])
+    .filter((decision) => decision?.title)
+    .map((decision) => ({
+      title: String(decision.title),
+      why: String(decision.why ?? ''),
+      paths: knownPaths(decision, 'decision'),
+    }))
+
   const findings = []
   for (const [index, finding] of (Array.isArray(analysis?.findings) ? analysis.findings : []).entries()) {
     if (!finding?.path || !byPath.has(finding.path)) {
@@ -186,6 +209,8 @@ export function mergeReview({ target, files, analysis, config = DEFAULT_CONFIG }
       assessment: String(analysis?.overview?.assessment ?? ''),
       risk: ['low', 'medium', 'high'].includes(analysis?.overview?.risk) ? analysis.overview.risk : 'medium',
     },
+    walkthrough,
+    decisions,
     slices,
     files: Object.fromEntries(files.map((f) => [f.path, f])),
     notes,
@@ -212,6 +237,8 @@ export function bareReview({
     target,
     taxonomy: { severities: config.review.severities, sliceKinds: config.review.sliceKinds },
     overview: { intent: '', assessment, risk: 'medium' },
+    walkthrough: [],
+    decisions: [],
     slices: [
       {
         id: 'all-files',

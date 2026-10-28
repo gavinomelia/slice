@@ -32,11 +32,11 @@ Usage:
   slice --wip        review what you have not committed yet
 
   By default this just opens the diff in the viewer — no model runs. Pass
-  --ai for the AI-analyzed review: slices, summaries, and findings. Once one
+  --ai for the AI-analyzed review: slices, a walkthrough, and findings. Once one
   exists it is reopened without --ai, so the flag is only for producing one.
 
 Options:
-  -a, --ai          run the AI analysis (slicing, summaries, findings)
+  -a, --ai          run the AI analysis (slices, walkthrough, findings)
   -p, --prompt <t>  add instructions to the review prompt (implies --ai);
                     repeatable — slice -p "review for security in particular"
   --branch          diff the local branch against its base instead of a PR
@@ -772,7 +772,7 @@ async function main() {
   const cached = existsSync(analysisPath) && !options.refresh
 
   if (!options.analyze && !cached) {
-    console.log('  no AI analysis (pass --ai for slices, summaries, and findings)')
+    console.log('  no AI analysis (pass --ai for slices, a walkthrough, and findings)')
   } else if (cached) {
     // Saying which run it came from matters when you did not ask for one:
     // otherwise slices appear from a command that promises not to analyze.

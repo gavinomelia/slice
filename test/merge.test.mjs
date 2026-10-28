@@ -165,3 +165,25 @@ test('bareReview takes a custom assessment, for the review the viewer opens on w
   const review = bareReview({ target, files, assessment: 'Analysis is running in the background.' })
   assert.equal(review.overview.assessment, 'Analysis is running in the background.')
 })
+
+test('walkthrough steps and decisions keep known paths and drop unknown ones', () => {
+  const { review, warnings } = build({
+    slices: [{ id: 's', title: 'S', kind: 'behavior', summary: '', paths: ['app/post.rb'] }],
+    walkthrough: [
+      { title: 'Author saves a post', body: 'b', paths: ['app/post.rb', 'ghost.rb'] },
+      { title: '', body: '' },
+    ],
+    decisions: [{ title: 'Validate in the model', why: 'w', paths: ['app/post.rb'] }, { why: 'no title' }],
+  })
+
+  assert.deepEqual(review.walkthrough, [{ title: 'Author saves a post', body: 'b', paths: ['app/post.rb'] }])
+  assert.deepEqual(review.decisions, [{ title: 'Validate in the model', why: 'w', paths: ['app/post.rb'] }])
+  assert.match(warnings.join(' '), /walkthrough step "Author saves a post" referenced unknown path ghost\.rb/)
+})
+
+test('a review without a walkthrough still merges with empty lists', () => {
+  const { review } = build({ slices: [{ id: 's', title: 'S', paths: ['app/post.rb'] }] })
+  assert.deepEqual(review.walkthrough, [])
+  assert.deepEqual(review.decisions, [])
+  assert.deepEqual(bareReview({ target, files }).walkthrough, [])
+})

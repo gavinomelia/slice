@@ -6,8 +6,8 @@
 A terminal PR/diff viewer that groups changed files by behavioral slice
 (the migration, model, controller, view, and spec that make one feature
 work) instead of by directory. Optionally adds an AI-generated review:
-slices, summaries, and findings, with the ability to comment and post
-back to GitHub.
+slices, a walkthrough of how the change works and why, and findings, with
+the ability to comment and post back to GitHub.
 
 ## Usage
 
