@@ -802,6 +802,7 @@ async function main() {
   // { review, warnings } once the provider replies, or null if it failed.
   let analysisPromise = null
   let analysisRunning = false
+  let analysisError = null
 
   // Reopening an analysis already on disk spawns no provider and sends nothing
   // anywhere, so --ai is what produces one, not what displays it. An earlier
@@ -882,16 +883,21 @@ async function main() {
         // written so the result is cached and `main` can report on it once the
         // terminal is back.
         analysisRunning = true
-        analysisPromise = task.then((result) => {
-          analysisRunning = false
-          if (!result) return null
-          analysis = result
-          writeFileSync(analysisPath, JSON.stringify(result, null, 2))
-          rmSync(rawPath, { force: true })
-          const merged = mergeReview({ target, files, analysis: result, config })
-          writeFileSync(reviewPath, JSON.stringify(merged.review, null, 2))
-          return merged
-        })
+        analysisPromise = task
+          .then((result) => {
+            analysisRunning = false
+            if (!result) return null
+            analysis = result
+            writeFileSync(analysisPath, JSON.stringify(result, null, 2))
+            rmSync(rawPath, { force: true })
+            const merged = mergeReview({ target, files, analysis: result, config })
+            writeFileSync(reviewPath, JSON.stringify(merged.review, null, 2))
+            return merged
+          })
+          .catch((error) => {
+            analysisError = error
+            return null
+          })
       } else {
         analysis = await task
       }
@@ -947,9 +953,12 @@ async function main() {
     // whether the analysis finished while it was still open or the user quit
     // first — either way, this is the first point since it kicked off that
     // printing anything is safe.
+    if (analysisRunning) console.error('  still analyzing — waiting so the result is cached (ctrl-c to give up)')
     const result = await analysisPromise
     if (!result) {
-      console.error('  analysis failed; the diff stayed open without it')
+      console.error(
+        `  analysis failed${analysisError ? `: ${analysisError.message}` : ''}; the diff stayed open without it`,
+      )
     } else {
       printCorrections(result.warnings)
     }
