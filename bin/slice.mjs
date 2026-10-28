@@ -212,6 +212,9 @@ function defaultBranch(repoRoot) {
   return 'main'
 }
 
+const repoName = (repoRoot) =>
+  tryRun('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'], { cwd: repoRoot })
+
 function resolvePrTarget(repoRoot, ref) {
   const fields = 'number,title,author,url,baseRefName,headRefName,headRefOid'
   const args = ['pr', 'view', ...(ref ? [String(ref)] : []), '--json', fields]
@@ -219,9 +222,7 @@ function resolvePrTarget(repoRoot, ref) {
   if (!raw) return null
 
   const pr = JSON.parse(raw)
-  const repo =
-    pr.url?.match(/github\.com\/([^/]+\/[^/]+)\/pull\//)?.[1] ??
-    tryRun('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'], { cwd: repoRoot })
+  const repo = pr.url?.match(/github\.com\/([^/]+\/[^/]+)\/pull\//)?.[1] ?? repoName(repoRoot)
   const viewer = tryRun('gh', ['api', 'user', '-q', '.login'], { cwd: repoRoot })
 
   return {
@@ -250,7 +251,7 @@ function resolveBranchTarget(repoRoot, base, ref = null) {
   const baseRef = base ?? defaultBranch(repoRoot)
   return {
     kind: 'branch',
-    repo: tryRun('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'], { cwd: repoRoot }) ?? '',
+    repo: repoName(repoRoot) ?? '',
     number: null,
     title: tryRun('git', ['log', '-1', '--pretty=%s', headRev], { cwd: repoRoot }) ?? headRef,
     author: tryRun('git', ['config', 'user.name'], { cwd: repoRoot }) ?? 'you',
@@ -274,10 +275,7 @@ const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
  * `headRev` and `headSha` stay null, and anything that walks git history has
  * to check `kind` before reaching for them.
  */
-function resolveWorktreeTarget(
-  repoRoot,
-  repo = tryRun('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'], { cwd: repoRoot }) ?? '',
-) {
+function resolveWorktreeTarget(repoRoot, repo = repoName(repoRoot) ?? '') {
   // `git branch --show-current` rather than rev-parse: it answers on a branch
   // with no commits yet, where HEAD is not a revision at all, and returns
   // empty on a detached HEAD instead of the string "HEAD".
@@ -584,6 +582,13 @@ function initConfig(scope, repoRoot) {
   mkdirSync(dirname(path), { recursive: true })
   writeFileSync(path, configTemplate(scope))
   console.log(`\n  wrote ${path}\n\n  The settings in it are commented out; uncomment what you want to change.\n`)
+}
+
+function printCorrections(warnings) {
+  if (warnings.length === 0) return
+  console.log(`\n  ${warnings.length} correction(s) applied to the analysis:`)
+  for (const warning of warnings.slice(0, 8)) console.log(`    · ${warning}`)
+  if (warnings.length > 8) console.log(`    · …and ${warnings.length - 8} more`)
 }
 
 function printConfig({ config, sources }) {
@@ -945,10 +950,8 @@ async function main() {
     const result = await analysisPromise
     if (!result) {
       console.error('  analysis failed; the diff stayed open without it')
-    } else if (result.warnings.length > 0) {
-      console.log(`\n  ${result.warnings.length} correction(s) applied to the analysis:`)
-      for (const warning of result.warnings.slice(0, 8)) console.log(`    · ${warning}`)
-      if (result.warnings.length > 8) console.log(`    · …and ${result.warnings.length - 8} more`)
+    } else {
+      printCorrections(result.warnings)
     }
     return
   }
@@ -959,11 +962,7 @@ async function main() {
 
   writeFileSync(reviewPath, JSON.stringify(review, null, 2))
 
-  if (warnings.length > 0) {
-    console.log(`\n  ${warnings.length} correction(s) applied to the analysis:`)
-    for (const warning of warnings.slice(0, 8)) console.log(`    · ${warning}`)
-    if (warnings.length > 8) console.log(`    · …and ${warnings.length - 8} more`)
-  }
+  printCorrections(warnings)
 
   const findings = review.findings.length
   const slices = review.slices.length

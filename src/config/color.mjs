@@ -20,20 +20,14 @@ export const blend = (under, over, alpha) => ({
   b: under.b + (over.b - under.b) * alpha,
 })
 
-export function luminance({ r, g, b }) {
-  const linear = (c) => {
-    const s = c / 255
-    return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4
-  }
-  return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
-}
-
-export const isLight = (color) => luminance(color) > 0.4
-
 const linear = (c) => {
   const s = c / 255
   return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4
 }
+
+export const luminance = ({ r, g, b }) => 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+
+export const isLight = (color) => luminance(color) > 0.4
 
 const gamma = (c) => 255 * (c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055)
 
