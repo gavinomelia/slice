@@ -28,6 +28,11 @@ reopens it without re-running the model. `--refresh` redoes it.
 `-p "..."` adds a one-off note to the review prompt and implies `--ai`. For
 rules that should apply every time, put them in `.slice.jsonc` instead.
 
+`slice -w` stays live: it watches the working tree and updates as files are
+edited, created, staged, or committed, keeping your place in the diff. It
+opens on a clean tree too, so it can sit beside an agent from the start.
+`r` reloads by hand.
+
 ## Install
 
 ```
@@ -68,6 +73,7 @@ repo's own config cannot widen its toolset — only yours can (see
 | `[` `]` | previous / next slice |
 | `n` `p` | next / previous finding, anywhere in the review |
 | `x` | mark the selected file — or whole slice — read, and move on |
+| `r` | reload the diff (`-w` only; it also reloads on its own) |
 | `y` `Y` | copy the findings here — or the whole review's — as a fix prompt |
 | `c` | comment on the diff's cursor line |
 | `s` `A` `R` | submit as comment / approve / request changes |

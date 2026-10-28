@@ -14,6 +14,7 @@ import { bareReview, mergeReview, REVIEW_REQUIRED_KEYS, REVIEW_VERSION } from '.
 import { analysisPrompt } from '../src/pipeline/prompt.mjs'
 import { resolveProvider } from '../src/pipeline/providers/index.mjs'
 import { extractJson, limitNotice } from '../src/pipeline/reply.mjs'
+import { watchDirs } from '../src/pipeline/watch.mjs'
 import { runViewer } from '../src/viewer/app.mjs'
 
 const require = createRequire(import.meta.url)
@@ -273,7 +274,10 @@ const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
  * `headRev` and `headSha` stay null, and anything that walks git history has
  * to check `kind` before reaching for them.
  */
-function resolveWorktreeTarget(repoRoot) {
+function resolveWorktreeTarget(
+  repoRoot,
+  repo = tryRun('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'], { cwd: repoRoot }) ?? '',
+) {
   // `git branch --show-current` rather than rev-parse: it answers on a branch
   // with no commits yet, where HEAD is not a revision at all, and returns
   // empty on a detached HEAD instead of the string "HEAD".
@@ -282,7 +286,7 @@ function resolveWorktreeTarget(repoRoot) {
 
   return {
     kind: 'worktree',
-    repo: tryRun('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'], { cwd: repoRoot }) ?? '',
+    repo,
     number: null,
     title: 'Uncommitted changes',
     author: tryRun('git', ['config', 'user.name'], { cwd: repoRoot }) ?? 'you',
@@ -319,7 +323,7 @@ function untrackedPatch(repoRoot, path) {
   }
 }
 
-function worktreePatch(repoRoot, target) {
+function worktreePatch(repoRoot, target, { quiet = false } = {}) {
   // Against the commit, not the index, so one diff carries both what is staged
   // and what is not — the distinction matters when you commit, not when you
   // read the change.
@@ -334,7 +338,7 @@ function worktreePatch(repoRoot, target) {
 
   // A file dropped from the diff without a word is a file you will believe you
   // have reviewed.
-  if (skipped.length > 0) {
+  if (skipped.length > 0 && !quiet) {
     const named = skipped.slice(0, 5).join(', ')
     const rest = skipped.length > 5 ? `, and ${skipped.length - 5} more` : ''
     console.error(
@@ -373,6 +377,31 @@ function worktreeStates(repoRoot, files) {
 function untrackedFiles(repoRoot) {
   const listed = tryRun('git', ['ls-files', '--others', '--exclude-standard'], { cwd: repoRoot })
   return listed ? listed.split('\n').filter(Boolean) : []
+}
+
+function worktreeDirs(repoRoot) {
+  const listed = (args) =>
+    run('git', ['ls-files', ...args, '-z'], { cwd: repoRoot })
+      .split('\0')
+      .filter(Boolean)
+  const dirs = new Set([repoRoot])
+  const addDir = (dir) => {
+    for (; dir !== '.' && !dirs.has(join(repoRoot, dir)); dir = dirname(dir)) dirs.add(join(repoRoot, dir))
+  }
+  for (const path of listed(['--cached', '--others', '--exclude-standard'])) addDir(dirname(path))
+  for (const dir of listed(['--others', '--exclude-standard', '--directory'])) addDir(dir.replace(/\/$/, ''))
+  return [...dirs]
+}
+
+function watchWorktree(repoRoot, { onChange, onError }) {
+  const gitDir = run('git', ['rev-parse', '--absolute-git-dir'], { cwd: repoRoot })
+  const gitDirs = [gitDir, join(gitDir, 'logs')]
+  return watchDirs({
+    dirs: () => [...worktreeDirs(repoRoot), ...gitDirs],
+    ignore: (dir, name) => gitDirs.includes(dir) && name !== 'HEAD' && name !== 'index',
+    onChange,
+    onError,
+  })
 }
 
 function capturePatch(repoRoot, target) {
@@ -705,7 +734,10 @@ async function main() {
     changed,
     target.kind === 'worktree' ? worktreeOrder(repoRoot, changed) : commitOrder(repoRoot, target),
   )
-  if (files.length === 0) {
+  const watching = target.kind === 'worktree' && process.stdout.isTTY && process.stdin.isTTY
+  if (files.length === 0 && watching && !options.analyze) {
+    console.log('  nothing uncommitted yet — the viewer updates as files change')
+  } else if (files.length === 0) {
     fail(
       target.kind === 'worktree'
         ? 'nothing uncommitted — the working tree is clean'
@@ -764,6 +796,7 @@ async function main() {
   // Set only when analysis is running against a live viewer: it resolves to
   // { review, warnings } once the provider replies, or null if it failed.
   let analysisPromise = null
+  let analysisRunning = false
 
   // Reopening an analysis already on disk spawns no provider and sends nothing
   // anywhere, so --ai is what produces one, not what displays it. An earlier
@@ -843,8 +876,11 @@ async function main() {
         // of its alternate screen instead of the scrollback. Files are still
         // written so the result is cached and `main` can report on it once the
         // terminal is back.
+        analysisRunning = true
         analysisPromise = task.then((result) => {
+          analysisRunning = false
           if (!result) return null
+          analysis = result
           writeFileSync(analysisPath, JSON.stringify(result, null, 2))
           rmSync(rawPath, { force: true })
           const merged = mergeReview({ target, files, analysis: result, config })
@@ -866,15 +902,41 @@ async function main() {
     }
   }
 
-  if (analysisPromise) {
-    const review = bareReview({
-      target,
-      files,
-      config,
-      assessment: 'Analysis is running in the background — this pane updates when it finishes.',
-    })
+  const runningAssessment = 'Analysis is running in the background — this pane updates when it finishes.'
+
+  let shownPatch = patch
+  let shownBase = target.baseRev
+  const reload = ({ force = false } = {}) => {
+    const next = resolveWorktreeTarget(repoRoot, target.repo)
+    const nextPatch = worktreePatch(repoRoot, next, { quiet: true })
+    if (!force && nextPatch === shownPatch && next.baseRev === shownBase) return null
+    shownPatch = nextPatch
+    shownBase = next.baseRev
+
+    const changed = splitPatch(nextPatch)
+    const nextFiles = orderByPaths(changed, worktreeOrder(repoRoot, changed))
+    const review = analysis
+      ? mergeReview({ target: next, files: nextFiles, analysis, config }).review
+      : bareReview({
+          target: next,
+          files: nextFiles,
+          config,
+          ...(analysisRunning ? { assessment: runningAssessment } : {}),
+        })
     writeFileSync(reviewPath, JSON.stringify(review, null, 2))
-    await runViewer({ review, reviewPath, repoRoot, config, warnings: configWarnings, analysisPromise })
+    return { review, stale: Boolean(analysis) && nextPatch !== patch }
+  }
+
+  const live = watching
+    ? { reload, watch: (handlers) => watchWorktree(repoRoot, handlers) }
+    : target.kind === 'worktree'
+      ? { reload }
+      : {}
+
+  if (analysisPromise) {
+    const review = bareReview({ target, files, config, assessment: runningAssessment })
+    writeFileSync(reviewPath, JSON.stringify(review, null, 2))
+    await runViewer({ review, reviewPath, repoRoot, config, warnings: configWarnings, analysisPromise, ...live })
 
     // The viewer has given the terminal back by the time this line runs,
     // whether the analysis finished while it was still open or the user quit
@@ -907,7 +969,7 @@ async function main() {
   const slices = review.slices.length
   console.log(`\n  ${slices} slice(s), ${findings} finding(s)\n`)
 
-  await runViewer({ review, reviewPath, repoRoot, config, warnings: configWarnings })
+  await runViewer({ review, reviewPath, repoRoot, config, warnings: configWarnings, ...live })
 }
 
 // A stack trace is for whoever is fixing slice, not for whoever is using it.

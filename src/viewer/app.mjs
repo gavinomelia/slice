@@ -326,7 +326,7 @@ const Lines = ({ lines, top, height }) =>
     ),
   )
 
-function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPromise }) {
+function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPromise, reload, watch }) {
   const { exit } = useApp()
   const { stdout } = useStdout()
   const { theme, layout } = ui
@@ -389,6 +389,25 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
   const [analyzing, setAnalyzing] = useState(Boolean(analysisPromise))
   const [analyzingFor, setAnalyzingFor] = useState(0)
 
+  const reloaded = useRef(false)
+  const reloadRef = useRef(null)
+  const [watching, setWatching] = useState(Boolean(watch))
+
+  useEffect(() => {
+    if (!watch) return
+    return watch({
+      onChange: () => reloadRef.current({ quiet: true }),
+      onError: (error) => {
+        setWatching(false)
+        setStatus({
+          tone: theme.risk.medium,
+          text: `Stopped watching for changes: ${error.message} — r still reloads.`,
+          ms: 8000,
+        })
+      },
+    })
+  }, [])
+
   useEffect(() => {
     if (!analysisPromise) return
     let live = true
@@ -407,7 +426,8 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
         })
         return
       }
-      setReview(result.review)
+      if (reloaded.current) reloadRef.current({ force: true, quiet: true })
+      else setReview(result.review)
       setStatus(
         result.warnings.length
           ? {
@@ -469,21 +489,28 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
   const splitRef = useRef(split)
   splitRef.current = split
 
+  const keepView = useRef(null)
+  const file = path ? review.files[path] : null
+
   useEffect(() => {
     if (!path) return setRows([])
     let live = true
-    setLoading(true)
-    buildRows(review.files[path], { theme: ui.syntax, tabWidth: layout.tabWidth })
+    const kept = keepView.current?.path === path ? keepView.current : null
+    keepView.current = null
+    if (!kept) setLoading(true)
+    buildRows(file, { theme: ui.syntax, tabWidth: layout.tabWidth })
       .then((next) => {
         if (!live) return
         setRows(next)
-        setScroll(0)
-        setHOffset(0)
+        if (!kept) {
+          setScroll(0)
+          setHOffset(0)
+        }
         // Landing here from n/p should put the cursor on the finding's line,
         // not the top of the file — otherwise you have to hunt for it.
         const shown = splitRef.current ? splitRows(next) : next
         const at = pendingLine.current ? shown.findIndex((r) => rowHasLine(r, pendingLine.current)) : -1
-        setCursor(at >= 0 ? at : 0)
+        setCursor(at >= 0 ? at : kept ? Math.min(kept.cursor, Math.max(0, shown.length - 1)) : 0)
         pendingLine.current = null
         setLoading(false)
       })
@@ -496,7 +523,7 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
     return () => {
       live = false
     }
-  }, [review, path, ui.syntax, layout.tabWidth])
+  }, [path, file?.patch, ui.syntax, layout.tabWidth])
 
   // Chrome: header 2, footer 1, pane border 2 + title 1, and one spare row.
   //
@@ -590,6 +617,49 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
     if (at >= 0) return setTreeIndex(at)
     setStatus({ tone: theme.ui.reviewed, text: 'Every file in this review is marked read.' })
   }
+
+  const applyReload = ({ force = false, quiet = false } = {}) => {
+    if (!reload) {
+      return setStatus({ tone: theme.ui.muted, text: 'Only uncommitted changes reload — open them with slice -w.' })
+    }
+
+    let next
+    try {
+      next = reload({ force })
+    } catch (error) {
+      return setStatus({ tone: theme.risk.high, text: `Reload failed: ${error.message}` })
+    }
+    if (!next) return quiet || setStatus({ tone: theme.ui.muted, text: 'The diff is already up to date.' })
+    reloaded.current = true
+
+    const nextTree = buildTree(next.review)
+    const same = (row) =>
+      row.type === current?.type &&
+      (row.type === 'file'
+        ? row.path === current.path
+        : row.type === 'slice'
+          ? next.review.slices[row.sliceIndex]?.id === slice?.id
+          : true)
+    const at = current ? nextTree.findIndex(same) : -1
+
+    const nextFile = path ? next.review.files[path] : null
+    if (at >= 0 && nextFile && nextFile.patch !== file?.patch) {
+      keepView.current = { path, cursor }
+      pendingLine.current = cellAt(view[cursor], side)?.line ?? null
+    }
+
+    setReview(next.review)
+    setReviewed(loadReviewed(reviewPath, next.review))
+    setTreeIndex(at >= 0 ? at : Math.min(treeIndex, nextTree.length - 1))
+
+    const count = Object.keys(next.review.files).length
+    setStatus({
+      tone: next.stale ? theme.risk.medium : theme.ui.muted,
+      text: `Diff updated · ${count} file(s)${next.stale ? ' · the analysis is of an earlier version (slice -w --refresh)' : ''}`,
+      ms: next.stale ? 4000 : 1500,
+    })
+  }
+  reloadRef.current = applyReload
 
   /**
    * Hand findings to something that can fix them. Scoped off the tree's
@@ -819,6 +889,7 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
     // Bound regardless of which pane has focus: it acts on what the tree has
     // selected, which is the same thing panes 2 and 3 are already showing.
     if (input === 'x') return toggleRead()
+    if (input === 'r') return applyReload()
     if (input === 'y' || input === 'Y') return yank(input === 'Y')
     if (input === 's' || input === 'A' || input === 'R') {
       const event = input === 'A' ? 'APPROVE' : input === 'R' ? 'REQUEST_CHANGES' : 'COMMENT'
@@ -1019,7 +1090,7 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
   // not. Split spends its spare room teaching H/L, since two columns are the
   // only place a side to choose exists.
   const KEYS = {
-    tree: '[j/k] move  [[/]] slice  [x] read  [y] fix  [tab] pane  [n/p] finding  [q] quit',
+    tree: `[j/k] move  [[/]] slice  [x] read  [y] fix  [tab] pane  [n/p] finding${reload ? '  [r] reload' : ''}  [q] quit`,
     diff: split
       ? '[j/k] line  [H/L] side  [h/l] scroll  [v] unified  [c] comment  [x] read  [s/A/R] submit'
       : '[j/k] line  [h/l] scroll  [v] split  [z] zoom  [c] comment  [x] read  [s/A/R] submit',
@@ -1040,7 +1111,7 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
         h(
           Text,
           { color: theme.ui.muted },
-          `  ${review.target.kind === 'pr' ? `#${review.target.number}` : review.target.headRef} · ${review.target.author}`,
+          `  ${review.target.kind === 'pr' ? `#${review.target.number}` : review.target.headRef} · ${review.target.author}${watching ? ' · live' : ''}`,
         ),
       ),
       h(
@@ -1220,6 +1291,8 @@ export async function runViewer({
   config = null,
   warnings = [],
   analysisPromise = null,
+  reload = null,
+  watch = null,
 }) {
   // Ink needs raw mode on a real terminal. Without this guard, piping the
   // output or running under CI ends in a wall of React reconciler stack trace
@@ -1254,7 +1327,9 @@ export async function runViewer({
   // not exist until render() returns.
   const ink = {}
   try {
-    ink.instance = render(h(App, { review, reviewPath, repoRoot, ink, ui, analysisPromise }), { exitOnCtrlC: false })
+    ink.instance = render(h(App, { review, reviewPath, repoRoot, ink, ui, analysisPromise, reload, watch }), {
+      exitOnCtrlC: false,
+    })
     await ink.instance.waitUntilExit()
   } finally {
     // Leaving the alternate screen has to happen even if the render threw, or
