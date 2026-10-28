@@ -3,10 +3,10 @@ name: Release
 # Publishing is driven by a tag, so what ships is always a commit that exists
 # in history rather than whatever happened to be on a laptop.
 #
-# One-time setup: add an npm automation token as the NPM_TOKEN secret. Trusted
-# publishing via OIDC needs `id-token: write`, which is why it is requested
-# below — it is also what puts a provenance attestation on the published
-# package, letting anyone verify the tarball was built from this repo.
+# There is no npm token: npm trusts this workflow directly, via trusted
+# publishing (`npm trust github`). That needs `id-token: write`, which is why it
+# is requested below — it is also what puts a provenance attestation on the
+# published package, letting anyone verify the tarball was built from this repo.
 on:
   push:
     tags: ['v*']
@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
           cache: npm
 
@@ -40,6 +40,14 @@ jobs:
             exit 1
           fi
 
-      - run: npm publish --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: the version is not on npm yet
+        id: unpublished
+        run: |
+          if npm view "$(node -p "require('./package.json').name")@${GITHUB_REF_NAME#v}" version >/dev/null 2>&1; then
+            echo "::notice::${GITHUB_REF_NAME#v} is already on npm, so there is nothing to publish"
+          else
+            echo "yes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.unpublished.outputs.yes == 'true'
+        run: npm publish --provenance
