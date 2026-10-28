@@ -28,7 +28,7 @@ const dark = {
     /** Intra-line word changes, tinted harder than the line they sit on. */
     addWordBg: '#173a24',
     delWordBg: '#46201f',
-    opacity: { line: 0.14, word: 0.3 },
+    tint: { line: 0.035, word: 0.07 },
     addTint: '#3fb950',
     delTint: '#f85149',
     addMark: 'green',
@@ -91,7 +91,7 @@ const light = {
     contextBg: null,
     addWordBg: '#aceebb',
     delWordBg: '#ffc1bc',
-    opacity: { line: 0.14, word: 0.3 },
+    tint: { line: 0.035, word: 0.07 },
     addTint: '#1a7f37',
     delTint: '#cf222e',
     addMark: 'green',

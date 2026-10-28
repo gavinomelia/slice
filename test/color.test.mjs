@@ -24,15 +24,14 @@ test('blending is a straight mix from the background toward the colour', () => {
 
 test('diff tints sit just above the terminal background, not below it', () => {
   const { diff } = adaptToBackground(THEMES.dark, slate)
-  assert.equal(diff.addBg, '#2e443d')
   assert.ok(parseHex(diff.addBg).g > slate.g, 'an added line is greener than the background')
   assert.ok(parseHex(diff.delBg).r > slate.r, 'a removed line is redder than the background')
   assert.ok(parseHex(diff.addWordBg).g > parseHex(diff.addBg).g, 'changed words are tinted harder than their line')
 })
 
-test('without a background, or with opacity turned off, the fixed colours stand', () => {
+test('without a background, or with tinting turned off, the fixed colours stand', () => {
   assert.equal(adaptToBackground(THEMES.dark, null), THEMES.dark)
-  const fixed = resolveTheme({ preset: 'dark', diff: { opacity: null } }, slate)
+  const fixed = resolveTheme({ preset: 'dark', diff: { tint: null } }, slate)
   assert.equal(fixed.diff.addBg, THEMES.dark.diff.addBg)
 })
 
@@ -81,6 +80,10 @@ for (const [name, bg] of Object.entries(omarchy)) {
         `${key} ${theme.diff[key]} is subtle on ${bg}`,
       )
     }
+    const added = parseHex(theme.diff.addBg)
+    const removed = parseHex(theme.diff.delBg)
+    assert.ok(added.g > added.r && added.g > added.b, `added ${theme.diff.addBg} reads as green`)
+    assert.ok(removed.r > removed.g, `removed ${theme.diff.delBg} reads as red`)
   })
 }
 
