@@ -22,12 +22,13 @@ const dark = {
   syntax: 'pierre-dark',
 
   diff: {
-    addBg: '#0b2c18',
-    delBg: '#3a1114',
+    addBg: '#0d1f15',
+    delBg: '#261315',
     contextBg: null,
     /** Intra-line word changes, tinted harder than the line they sit on. */
-    addWordBg: '#1c5c31',
-    delWordBg: '#6b1f26',
+    addWordBg: '#173a24',
+    delWordBg: '#46201f',
+    opacity: { line: 0.14, word: 0.3 },
     addMark: '#3fb950',
     delMark: '#f85149',
     lineNumber: 'gray',
@@ -66,6 +67,7 @@ const dark = {
   markdown: {
     code: 'cyan',
     codeBg: '#2c2f36',
+    codeBgOpacity: 0.07,
     link: 'blue',
     fence: 'green',
     quote: 'gray',
@@ -87,6 +89,7 @@ const light = {
     contextBg: null,
     addWordBg: '#aceebb',
     delWordBg: '#ffc1bc',
+    opacity: { line: 0.14, word: 0.3 },
     addMark: '#1a7f37',
     delMark: '#cf222e',
     lineNumber: 'gray',
@@ -119,6 +122,7 @@ const light = {
   markdown: {
     code: 'blue',
     codeBg: '#eaeef2',
+    codeBgOpacity: 0.06,
     link: 'blue',
     fence: 'green',
     quote: 'gray',

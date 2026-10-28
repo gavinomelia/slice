@@ -19,7 +19,13 @@ const UNKNOWN_SEVERITY = { glyph: '·', color: 'gray' }
 /** A status no theme names draws as blank, the way `modified` does. */
 const UNKNOWN_STATUS = { glyph: ' ', color: null }
 
-export function viewerConfig({ review, cwd = process.cwd(), config: resolved = null, warnings: given = [] }) {
+export function viewerConfig({
+  review,
+  cwd = process.cwd(),
+  config: resolved = null,
+  warnings: given = [],
+  background = null,
+}) {
   let config = resolved
   // Anything the CLI printed before the viewer started is gone the moment the
   // alternate screen opens, so its warnings are carried in and shown here
@@ -50,7 +56,7 @@ export function viewerConfig({ review, cwd = process.cwd(), config: resolved = n
 
   // Unlike the taxonomies, a file's status comes from the patch rather than the
   // analysis, so it is appearance all the way down and belongs to the theme.
-  const theme = resolveTheme(config.theme)
+  const theme = resolveTheme(config.theme, background)
 
   return {
     theme,

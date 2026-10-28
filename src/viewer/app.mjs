@@ -29,6 +29,8 @@ import { partitionDrafts, postReview } from './github.mjs'
 import { handOff } from './handoff.mjs'
 import { buildTree, cellAt, draftKey, rowHasLine, sideAt, windowFor } from './tree.mjs'
 import { loadReviewed, nextUnreviewed, pathsForRow, saveReviewed, sliceReviewed, toggleReviewed } from './progress.mjs'
+import { parseHex } from '../config/color.mjs'
+import { queryBackground } from './terminal.mjs'
 import { viewerConfig } from './theme.mjs'
 
 const PANES = ['tree', 'diff', 'findings']
@@ -1311,7 +1313,8 @@ export async function runViewer({
     return
   }
 
-  const ui = viewerConfig({ review, cwd: repoRoot, config, warnings })
+  const background = (await queryBackground()) ?? parseHex(config?.theme?.background)
+  const ui = viewerConfig({ review, cwd: repoRoot, config, warnings, background })
   ui.syntax = await resolveSyntaxTheme(ui.theme.syntax)
   setMarkdownTheme(ui.theme.markdown)
 

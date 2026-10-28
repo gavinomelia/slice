@@ -71,7 +71,7 @@ export const DEFAULT_CONFIG = {
     promptFile: null,
   },
 
-  theme: 'dark',
+  theme: 'auto',
 
   layout: {
     diffView: 'unified',

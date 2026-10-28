@@ -35,9 +35,13 @@ const REPO = `// How this repo is reviewed. Commit it: everyone reviewing this p
 
 const USER = `// How slice looks and runs, for you, in every repo.
 {
-  // "dark", "light", or a preset plus overrides.
+  // "auto" (dark or light to match your terminal), "dark", "light", or a preset plus overrides.
   "theme": {
-    "preset": "dark"
+    "preset": "auto"
+    // Asked of the terminal at startup; this is only used if it does not answer.
+    // "background": "#1e1e2e",
+    // Diff highlights are your add/remove colours laid over the background.
+    // "diff": { "opacity": { "line": 0.14, "word": 0.3 } },
     // "syntax": "tokyo-night",
     // "ui": { "accent": "magenta", "borderFocus": "magenta" }
   },

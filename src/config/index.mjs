@@ -18,6 +18,7 @@ import { isAbsolute, join, resolve, sep } from 'node:path'
 
 import { DEFAULT_CONFIG } from './defaults.mjs'
 import { DEFAULT_THEME_NAME, THEMES } from './themes.mjs'
+import { adaptToBackground, isLight } from './color.mjs'
 
 export { DEFAULT_CONFIG, DEFAULT_SEVERITIES, DEFAULT_SLICE_KINDS } from './defaults.mjs'
 export { THEMES } from './themes.mjs'
@@ -283,13 +284,16 @@ function unknownKeys(patch, path) {
  * `{ preset: "light", ui: { accent: "magenta" } }` — the last of which is what
  * almost everyone actually wants.
  */
-export function resolveTheme(theme) {
-  if (typeof theme === 'string') return THEMES[theme] ?? THEMES[DEFAULT_THEME_NAME]
-  if (!isPlainObject(theme)) return THEMES[DEFAULT_THEME_NAME]
+export function resolveTheme(theme, background = null) {
+  const presetFor = (name) =>
+    name === 'auto' ? THEMES[background && isLight(background) ? 'light' : 'dark'] : THEMES[name]
+
+  if (typeof theme === 'string') return adaptToBackground(presetFor(theme) ?? THEMES[DEFAULT_THEME_NAME], background)
+  if (!isPlainObject(theme)) return adaptToBackground(THEMES[DEFAULT_THEME_NAME], background)
 
   const { preset, ...overrides } = theme
-  const base = THEMES[preset] ?? THEMES[DEFAULT_THEME_NAME]
-  return mergePatch(base, overrides)
+  const base = presetFor(preset) ?? THEMES[DEFAULT_THEME_NAME]
+  return adaptToBackground(mergePatch(base, overrides), background)
 }
 
 /**
