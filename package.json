@@ -1,6 +1,6 @@
 {
   "name": "@gavinomelia/slice",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Read a pull request as behavioral slices, not as a pile of files — an AI-analyzed diff in your terminal",
   "keywords": [
     "pull-request",
@@ -52,7 +52,7 @@
     "format:check": "prettier --check ."
   },
   "dependencies": {
-    "@pierre/diffs": "^1.3.6",
+    "@pierre/diffs": "1.5.2",
     "ink": "^6.6.0",
     "react": "^19.2.8"
   },

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { buildRows, splitRows } from '../src/viewer/render.mjs'
+import { buildRows, codeHighlighter, splitRows } from '../src/viewer/render.mjs'
 
 const diff = (...lines) => lines.join('\n') + '\n'
 
@@ -78,4 +78,21 @@ test('carries both numberings for a context line', async () => {
   const context = built.find((row) => row.kind === 'ctx')
   assert.equal(context.line, 5, 'the addition side, which is what the unified gutter shows')
   assert.equal(context.lineBefore, 1, 'the deletion side, for split view’s left column')
+})
+
+test('highlights a fenced code block into colored segments', async () => {
+  const highlight = await codeHighlighter()
+  const lines = highlight('const answer = 42\nreturn answer', 'javascript')
+
+  assert.equal(lines.length, 2, 'one segment list per source line')
+  assert.equal(lines[0].map((s) => s.text).join(''), 'const answer = 42')
+  assert.ok(
+    lines.flat().some((s) => s.color),
+    'at least one token carries a color',
+  )
+})
+
+test('leaves a block in an unknown language for the caller to print plain', async () => {
+  const highlight = await codeHighlighter()
+  assert.equal(highlight('whatever', 'not-a-language'), null)
 })
