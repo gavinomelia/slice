@@ -153,3 +153,9 @@ and `src/config/` holds the defaults, themes, and config loader. Set
 ## License
 
 MIT
+
+## Credits
+
+Diff parsing and syntax highlighting come from
+[`@pierre/diffs`](https://www.npmjs.com/package/@pierre/diffs) by Pierre Computer
+Company, used under the Apache License 2.0.
