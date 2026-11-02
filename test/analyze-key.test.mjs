@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { after, test } from 'node:test'
+import { after, afterEach, test } from 'node:test'
 
 const BIN = fileURLToPath(new URL('../bin/slice.mjs', import.meta.url))
 const skip =
@@ -12,6 +12,11 @@ const skip =
 
 const root = mkdtempSync(join(tmpdir(), 'slice-key-'))
 after(() => rmSync(root, { recursive: true, force: true }))
+
+const children = []
+afterEach(() => {
+  for (const child of children.splice(0)) child.kill()
+})
 
 const REPLY = JSON.stringify({
   result: JSON.stringify({
@@ -74,9 +79,12 @@ function open({ repo, stubs, cache, config }, ...flags) {
       XDG_CACHE_HOME: cache,
       XDG_CONFIG_HOME: config,
       TERM: 'xterm',
+      CI: 'false',
+      CONTINUOUS_INTEGRATION: 'false',
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   })
+  children.push(child)
   let screen = ''
   child.stdout.on('data', (chunk) => (screen += chunk))
   const closed = new Promise((done) => child.on('close', done))
