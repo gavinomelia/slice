@@ -1,6 +1,6 @@
 {
   "name": "@gavinomelia/slice",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Read a pull request as behavioral slices, not as a pile of files — an AI-analyzed diff in your terminal",
   "keywords": [
     "pull-request",
