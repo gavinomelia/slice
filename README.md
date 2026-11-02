@@ -53,10 +53,12 @@ slice --branch     # the local branch against its base, ignoring any PR
 slice -w           # uncommitted work, updated live as files change
 slice --ai         # add the AI review: slices, walkthrough, findings
 slice -p "..."     # the AI review, with an extra instruction for this run
+slice -m opus      # analyze with this model, via --ai or the a key
 ```
 
-By default, slice opens the diff without running a model. Once `--ai` has
-analyzed a review, running `slice` again reopens that analysis.
+By default, slice opens the diff without running a model. Press `a` in the
+viewer to analyze it without reopening, or pass `--ai` to start right away.
+Once a review has been analyzed, running `slice` again reopens that analysis.
 `--refresh` runs it again.
 
 ![Uncommitted work in split view](docs/screenshots/wip.png)
@@ -78,6 +80,7 @@ Press `?` in slice to see every key. The essentials:
 | `c` | comment on the cursor line (`H` `L` pick the side in split view) |
 | `s` `A` `R` | submit as comment / approve / request changes |
 | `y` `Y` | copy findings here, or all of them, as a fix prompt |
+| `a` | run the AI analysis in the background |
 | `r` | reload (`-w`; it also reloads on its own) |
 | `?` | show all keys |
 | `q` | quit |

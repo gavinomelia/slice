@@ -113,7 +113,7 @@ const Lines = ({ lines, top, height }) =>
     ),
   )
 
-function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPromise, reload, watch }) {
+function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPromise, analyze, reload, watch }) {
   const { exit } = useApp()
   const { stdout } = useStdout()
   const { theme, layout } = ui
@@ -174,11 +174,13 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
   // shortcut line the way a `status` message does — but a `status` is a
   // one-off with its own timer, and this has to stay up for as long as the
   // analysis is running, then hand off to a status once it says how that went.
+  const [analysisTask, setAnalysisTask] = useState(analysisPromise)
   const [analyzing, setAnalyzing] = useState(Boolean(analysisPromise))
   const [analyzingFor, setAnalyzingFor] = useState(0)
 
   const reloaded = useRef(false)
   const reloadRef = useRef(null)
+  const adoptRef = useRef(null)
   const [watching, setWatching] = useState(Boolean(watch))
 
   useEffect(() => {
@@ -197,25 +199,27 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
   }, [])
 
   useEffect(() => {
-    if (!analysisPromise) return
+    if (!analysisTask) return
     let live = true
     const startedAt = Date.now()
+    setAnalyzing(true)
+    setAnalyzingFor(0)
     const ticker = setInterval(() => live && setAnalyzingFor(Math.round((Date.now() - startedAt) / 1000)), 1000)
 
-    analysisPromise.then((result) => {
+    analysisTask.then((result) => {
       clearInterval(ticker)
       if (!live) return
       setAnalyzing(false)
-      if (!result) {
+      if (reloaded.current) reloadRef.current({ force: true, quiet: true })
+      else adoptRef.current(result.review)
+      if (result.failed) {
         setStatus({
           tone: theme.risk.medium,
-          text: 'Analysis failed — still just the diff. Details print once you quit.',
+          text: 'Analysis failed — a tries again. Details print once you quit.',
           ms: 8000,
         })
         return
       }
-      if (reloaded.current) reloadRef.current({ force: true, quiet: true })
-      else setReview(result.review)
       setStatus(
         result.warnings.length
           ? {
@@ -231,9 +235,7 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
       live = false
       clearInterval(ticker)
     }
-    // analysisPromise is created once, for the life of this run, so this
-    // effect is meant to fire exactly once rather than track a changing prop.
-  }, [])
+  }, [analysisTask])
 
   /**
    * Put the viewer back on screen after $EDITOR has had it.
@@ -407,6 +409,29 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
     setStatus({ tone: theme.ui.reviewed, text: 'Every file in this review is marked read.' })
   }
 
+  const adopt = (nextReview) => {
+    const nextTree = buildTree(nextReview)
+    const same = (row) =>
+      row.type === current?.type &&
+      (row.type === 'file'
+        ? row.path === current.path
+        : row.type === 'slice'
+          ? nextReview.slices[row.sliceIndex]?.id === slice?.id
+          : true)
+    const at = current ? nextTree.findIndex(same) : -1
+
+    const nextFile = path ? nextReview.files[path] : null
+    if (at >= 0 && nextFile && nextFile.patch !== file?.patch) {
+      keepView.current = { path, cursor }
+      pendingLine.current = cellAt(view[cursor], side)?.line ?? null
+    }
+
+    setReview(nextReview)
+    setReviewed(loadReviewed(reviewPath, nextReview))
+    setTreeIndex(at >= 0 ? at : Math.min(treeIndex, nextTree.length - 1))
+  }
+  adoptRef.current = adopt
+
   const applyReload = ({ force = false, quiet = false } = {}) => {
     if (!reload) {
       return setStatus({ tone: theme.ui.muted, text: 'Only uncommitted changes reload — open them with slice -w.' })
@@ -420,35 +445,34 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
     }
     if (!next) return quiet || setStatus({ tone: theme.ui.muted, text: 'The diff is already up to date.' })
     reloaded.current = true
-
-    const nextTree = buildTree(next.review)
-    const same = (row) =>
-      row.type === current?.type &&
-      (row.type === 'file'
-        ? row.path === current.path
-        : row.type === 'slice'
-          ? next.review.slices[row.sliceIndex]?.id === slice?.id
-          : true)
-    const at = current ? nextTree.findIndex(same) : -1
-
-    const nextFile = path ? next.review.files[path] : null
-    if (at >= 0 && nextFile && nextFile.patch !== file?.patch) {
-      keepView.current = { path, cursor }
-      pendingLine.current = cellAt(view[cursor], side)?.line ?? null
-    }
-
-    setReview(next.review)
-    setReviewed(loadReviewed(reviewPath, next.review))
-    setTreeIndex(at >= 0 ? at : Math.min(treeIndex, nextTree.length - 1))
+    adopt(next.review)
 
     const count = Object.keys(next.review.files).length
     setStatus({
       tone: next.stale ? theme.risk.medium : theme.ui.muted,
-      text: `Diff updated · ${count} file(s)${next.stale ? ' · the analysis is of an earlier version (slice -w --refresh)' : ''}`,
+      text: `Diff updated · ${count} file(s)${next.stale ? ' · the analysis is of an earlier version (a redoes it)' : ''}`,
       ms: next.stale ? 4000 : 1500,
     })
   }
   reloadRef.current = applyReload
+
+  const startAnalysis = () => {
+    if (!analyze) {
+      return setStatus({ tone: theme.ui.muted, text: 'A review opened with --open cannot be analyzed from here.' })
+    }
+
+    let started
+    try {
+      started = analyze()
+    } catch (error) {
+      return setStatus({ tone: theme.risk.high, text: `Could not start the analysis: ${error.message}` })
+    }
+    if (started.refused) return setStatus({ tone: theme.ui.muted, text: started.refused })
+
+    adopt(started.review)
+    setStatus(null)
+    setAnalysisTask(started.promise)
+  }
 
   /**
    * Hand findings to something that can fix them. Scoped off the tree's
@@ -681,6 +705,7 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
     // selected, which is the same thing panes 2 and 3 are already showing.
     if (input === 'x') return toggleRead()
     if (input === 'r') return applyReload()
+    if (input === 'a') return startAnalysis()
     if (input === 'y' || input === 'Y') return yank(input === 'Y')
     if (input === 's' || input === 'A' || input === 'R') {
       const event = input === 'A' ? 'APPROVE' : input === 'R' ? 'REQUEST_CHANGES' : 'COMMENT'
@@ -882,7 +907,7 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
   // not. Split spends its spare room teaching H/L, since two columns are the
   // only place a side to choose exists.
   const KEYS = {
-    tree: `[j/k] move  [[/]] slice  [x] read  [y] fix  [tab] pane  [n/p] finding${reload ? '  [r] reload' : ''}  [?] keys  [q] quit`,
+    tree: `[j/k] move  [[/]] slice  [x] read  [y] fix  [tab] pane  [n/p] finding${analyze ? '  [a] analyze' : ''}${reload ? '  [r] reload' : ''}  [?] keys  [q] quit`,
     diff: split
       ? '[j/k] line  [H/L] side  [h/l] scroll  [v] unified  [c] comment  [x] read  [s/A/R] submit  [?] keys'
       : '[j/k] line  [h/l] scroll  [v] split  [z] zoom  [c] comment  [x] read  [s/A/R] submit  [?] keys',
@@ -1084,6 +1109,7 @@ export async function runViewer({
   config = null,
   warnings = [],
   analysisPromise = null,
+  analyze = null,
   reload = null,
   watch = null,
 }) {
@@ -1123,7 +1149,7 @@ export async function runViewer({
   // not exist until render() returns.
   const ink = {}
   try {
-    ink.instance = render(h(App, { review, reviewPath, repoRoot, ink, ui, analysisPromise, reload, watch }), {
+    ink.instance = render(h(App, { review, reviewPath, repoRoot, ink, ui, analysisPromise, analyze, reload, watch }), {
       exitOnCtrlC: false,
     })
     await ink.instance.waitUntilExit()
