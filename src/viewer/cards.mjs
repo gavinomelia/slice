@@ -233,6 +233,7 @@ const KEY_GROUPS = [
       ['c', 'comment on the cursor line in $EDITOR'],
       ['s  A  R', 'submit as comment / approve / request changes'],
       ['y  Y', 'copy findings here, or all of them, as a fix prompt'],
+      ['a', 'run the AI analysis in the background'],
       ['r', 'reload the diff (-w)'],
     ],
   ],

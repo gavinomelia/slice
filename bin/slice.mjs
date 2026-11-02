@@ -33,13 +33,15 @@ Usage:
   slice -w           review what you have not committed yet
 
   By default this just opens the diff in the viewer — no model runs. Pass
-  --ai for the AI-analyzed review: slices, a walkthrough, and findings. Once one
-  exists it is reopened without --ai, so the flag is only for producing one.
+  --ai, or press a in the viewer, for the AI-analyzed review: slices, a
+  walkthrough, and findings. Once one exists it is reopened without --ai, so the
+  flag is only for producing one.
 
 Options:
   -a, --ai          run the AI analysis (slices, walkthrough, findings)
   -p, --prompt <t>  add instructions to the review prompt (implies --ai);
                     repeatable — slice -p "review for security in particular"
+  -m, --model <m>   the model to analyze with, for --ai or a (default: your config)
   --branch          diff the local branch against its base instead of a PR
   -w, --wip         diff the working tree: staged, unstaged, and untracked
   --base <ref>      base ref for --branch mode (default: the repo default branch)
@@ -104,6 +106,7 @@ function parseArgs(argv) {
     refresh: false,
     analyze: false,
     prompt: null,
+    model: null,
     open: null,
     timeout: 600,
     config: null,
@@ -162,7 +165,8 @@ function parseArgs(argv) {
       // them, so a shell alias can carry a standing rule and the call still
       // gets to say something of its own.
       options.prompt = options.prompt ? `${options.prompt}\n${text.trim()}` : text.trim()
-    } else if (arg === '--base') options.base = value('--base')
+    } else if (arg === '-m' || arg === '--model') options.model = value('--model')
+    else if (arg === '--base') options.base = value('--base')
     else if (arg === '--timeout') {
       // Dashes allowed through so the numeric check below owns the message: a
       // negative timeout deserves "needs a positive number", not "needs a value".
@@ -466,10 +470,11 @@ function orderByPaths(files, order) {
     .map(({ file }) => file)
 }
 
-function conventionSources(repoRoot, configured) {
+function conventionSources(repoRoot, configured, { quiet = false } = {}) {
   if (Array.isArray(configured)) {
     const missing = configured.filter((path) => !existsSync(join(repoRoot, path)))
-    for (const path of missing) console.error(`  config names a convention file that does not exist: ${path}`)
+    if (!quiet)
+      for (const path of missing) console.error(`  config names a convention file that does not exist: ${path}`)
     return configured.filter((path) => !missing.includes(path))
   }
 
@@ -500,6 +505,7 @@ function runAnalysis({
   config,
   provider,
   quiet = false,
+  onFailure = () => {},
 }) {
   const prompt = analysisPrompt({ patchPath, filesPath, target, repoRoot, conventionFiles, config })
 
@@ -534,6 +540,7 @@ function runAnalysis({
       if (ticker) clearInterval(ticker)
       clearTimeout(timer)
       if (live) process.stderr.write(`\r${' '.repeat(56)}\r`)
+      if (message) onFailure(message)
       if (!quiet) {
         const elapsed = `${Math.round((Date.now() - startedAt) / 1000)}s`
         if (message) console.error(`  analysis failed after ${elapsed}: ${message}`)
@@ -681,11 +688,14 @@ async function main() {
   const { sources, warnings: configWarnings } = loaded
   for (const warning of configWarnings) console.error(`  ${warning}`)
 
-  const config = options.prompt
-    ? mergePatch(loaded.config, {
-        review: { instructions: [loaded.config.review.instructions, options.prompt].filter(Boolean).join('\n\n') },
-      })
-    : loaded.config
+  const config = mergePatch(loaded.config, {
+    review: {
+      ...(options.prompt
+        ? { instructions: [loaded.config.review.instructions, options.prompt].filter(Boolean).join('\n\n') }
+        : {}),
+      ...(options.model ? { model: options.model } : {}),
+    },
+  })
 
   if (options.printConfig) return printConfig({ config, sources })
 
@@ -771,38 +781,97 @@ async function main() {
   // it to the patch it actually read makes that impossible. The review path
   // stays stable, so read marks and drafts still carry across an edit, file by
   // file, the way they already do across a force-push.
-  const stamp = target.kind === 'worktree' ? `-${createHash('sha256').update(patch).digest('hex').slice(0, 8)}` : ''
+  const stampFor = (patch) =>
+    target.kind === 'worktree' ? `-${createHash('sha256').update(patch).digest('hex').slice(0, 8)}` : ''
+  const analysisPaths = (patch) => {
+    const stamp = stampFor(patch)
+    if (stamp) pruneStaleAnalyses(cacheDir, id, `${id}${stamp}`)
+    return {
+      analysisPath: join(cacheDir, `${id}${stamp}${tag}.analysis.json`),
+      rawPath: join(cacheDir, `${id}${stamp}${tag}.analysis.raw.txt`),
+    }
+  }
 
   const patchPath = join(cacheDir, `${id}.patch`)
   const filesPath = join(cacheDir, `${id}.files.json`)
-  const analysisPath = join(cacheDir, `${id}${stamp}${tag}.analysis.json`)
-  const rawPath = join(cacheDir, `${id}${stamp}${tag}.analysis.raw.txt`)
+  const { analysisPath, rawPath } = analysisPaths(patch)
   const reviewPath = join(cacheDir, `${id}${tag}.review.json`)
 
-  if (stamp) pruneStaleAnalyses(cacheDir, id, `${id}${stamp}`)
-
-  writeFileSync(patchPath, patch)
-  writeFileSync(
-    filesPath,
-    JSON.stringify(
-      files.map(({ path, prevPath, status, additions, deletions }) => ({
-        path,
-        prevPath,
-        status,
-        additions,
-        deletions,
-      })),
-      null,
-      2,
-    ),
-  )
+  const writeDiff = (patch, files) => {
+    writeFileSync(patchPath, patch)
+    writeFileSync(
+      filesPath,
+      JSON.stringify(
+        files.map(({ path, prevPath, status, additions, deletions }) => ({
+          path,
+          prevPath,
+          status,
+          additions,
+          deletions,
+        })),
+        null,
+        2,
+      ),
+    )
+  }
+  writeDiff(patch, files)
 
   let analysis = null
+  let analyzedPatch = patch
   // Set only when analysis is running against a live viewer: it resolves to
-  // { review, warnings } once the provider replies, or null if it failed.
+  // { review, warnings } once the provider replies, or to
+  // { failed, reason, review } if it could not.
   let analysisPromise = null
   let analysisRunning = false
-  let analysisError = null
+
+  const runningAssessment = 'Analysis is running in the background — this pane updates when it finishes.'
+  const idleAssessment = 'No analysis was run for this review. Press a to run one.'
+
+  const currentReview = (target, files) =>
+    analysis
+      ? mergeReview({ target, files, analysis, config }).review
+      : bareReview({ target, files, config, assessment: analysisRunning ? runningAssessment : idleAssessment })
+
+  const runInBackground = ({ target, patch, files, analysisPath, rawPath, conventionFiles, provider }) => {
+    const failed = (reason) => ({ failed: true, reason, review: currentReview(target, files) })
+    let reason = null
+    const task = runAnalysis({
+      repoRoot,
+      target,
+      patchPath,
+      filesPath,
+      rawPath,
+      timeoutMs: options.timeout * 1000,
+      conventionFiles,
+      config,
+      provider,
+      quiet: true,
+      onFailure: (message) => (reason = message),
+    })
+
+    // Nothing here may touch stdout or stderr: the viewer already owns the
+    // terminal by the time this settles, and anything printed lands on top
+    // of its alternate screen instead of the scrollback. Files are still
+    // written so the result is cached and `main` can report on it once the
+    // terminal is back.
+    analysisRunning = true
+    analysisPromise = task
+      .then((result) => {
+        analysisRunning = false
+        if (!result) return failed(reason)
+        analysis = result
+        analyzedPatch = patch
+        writeFileSync(analysisPath, JSON.stringify(result, null, 2))
+        rmSync(rawPath, { force: true })
+        const merged = mergeReview({ target, files, analysis: result, config })
+        writeFileSync(reviewPath, JSON.stringify(merged.review, null, 2))
+        return merged
+      })
+      .catch((error) => {
+        analysisRunning = false
+        return failed(error.message)
+      })
+  }
 
   // Reopening an analysis already on disk spawns no provider and sends nothing
   // anywhere, so --ai is what produces one, not what displays it. An earlier
@@ -811,7 +880,7 @@ async function main() {
   const cached = existsSync(analysisPath) && !options.refresh
 
   if (!options.analyze && !cached) {
-    console.log('  no AI analysis (pass --ai for slices, a walkthrough, and findings)')
+    console.log('  no AI analysis (press a in the viewer, or pass --ai, for slices, a walkthrough, and findings)')
   } else if (cached) {
     // Saying which run it came from matters when you did not ask for one:
     // otherwise slices appear from a command that promises not to analyze.
@@ -820,6 +889,7 @@ async function main() {
         ? '  using cached analysis (--refresh to redo)'
         : '  using the analysis from an earlier --ai run (--refresh to redo)',
     )
+    if (options.model) console.log(`  --model ${options.model} only applies to a new analysis, so it is not used here`)
     try {
       analysis = JSON.parse(readFileSync(analysisPath, 'utf8'))
     } catch (error) {
@@ -863,43 +933,20 @@ async function main() {
       // it instead of this function waiting here.
       const interactive = process.stdout.isTTY && process.stdin.isTTY
 
-      const task = runAnalysis({
-        repoRoot,
-        target,
-        patchPath,
-        filesPath,
-        rawPath,
-        timeoutMs: options.timeout * 1000,
-        conventionFiles,
-        config,
-        provider,
-        quiet: interactive,
-      })
-
       if (interactive) {
-        // Nothing here may touch stdout or stderr: the viewer already owns the
-        // terminal by the time this settles, and anything printed lands on top
-        // of its alternate screen instead of the scrollback. Files are still
-        // written so the result is cached and `main` can report on it once the
-        // terminal is back.
-        analysisRunning = true
-        analysisPromise = task
-          .then((result) => {
-            analysisRunning = false
-            if (!result) return null
-            analysis = result
-            writeFileSync(analysisPath, JSON.stringify(result, null, 2))
-            rmSync(rawPath, { force: true })
-            const merged = mergeReview({ target, files, analysis: result, config })
-            writeFileSync(reviewPath, JSON.stringify(merged.review, null, 2))
-            return merged
-          })
-          .catch((error) => {
-            analysisError = error
-            return null
-          })
+        runInBackground({ target, patch, files, analysisPath, rawPath, conventionFiles, provider })
       } else {
-        analysis = await task
+        analysis = await runAnalysis({
+          repoRoot,
+          target,
+          patchPath,
+          filesPath,
+          rawPath,
+          timeoutMs: options.timeout * 1000,
+          conventionFiles,
+          config,
+          provider,
+        })
       }
     }
 
@@ -913,29 +960,73 @@ async function main() {
     }
   }
 
-  const runningAssessment = 'Analysis is running in the background — this pane updates when it finishes.'
+  const worktreeNow = () => {
+    const next = resolveWorktreeTarget(repoRoot, target.repo)
+    const nextPatch = worktreePatch(repoRoot, next, { quiet: true })
+    const changed = splitPatch(nextPatch)
+    return { target: next, patch: nextPatch, files: orderByPaths(changed, worktreeOrder(repoRoot, changed)) }
+  }
 
   let shownPatch = patch
   let shownBase = target.baseRev
   const reload = ({ force = false } = {}) => {
-    const next = resolveWorktreeTarget(repoRoot, target.repo)
-    const nextPatch = worktreePatch(repoRoot, next, { quiet: true })
-    if (!force && nextPatch === shownPatch && next.baseRev === shownBase) return null
-    shownPatch = nextPatch
-    shownBase = next.baseRev
+    const next = worktreeNow()
+    if (!force && next.patch === shownPatch && next.target.baseRev === shownBase) return null
+    shownPatch = next.patch
+    shownBase = next.target.baseRev
 
-    const changed = splitPatch(nextPatch)
-    const nextFiles = orderByPaths(changed, worktreeOrder(repoRoot, changed))
-    const review = analysis
-      ? mergeReview({ target: next, files: nextFiles, analysis, config }).review
-      : bareReview({
-          target: next,
-          files: nextFiles,
-          config,
-          ...(analysisRunning ? { assessment: runningAssessment } : {}),
-        })
+    const review = currentReview(next.target, next.files)
     writeFileSync(reviewPath, JSON.stringify(review, null, 2))
-    return { review, stale: Boolean(analysis) && nextPatch !== patch }
+    return { review, stale: Boolean(analysis) && next.patch !== analyzedPatch }
+  }
+
+  const analyze = () => {
+    if (analysisRunning) return { refused: 'The analysis is already running.' }
+
+    const now = target.kind === 'worktree' ? worktreeNow() : { target, patch, files }
+    if (now.files.length === 0) return { refused: 'Nothing to analyze — the working tree is clean.' }
+    if (analysis && now.patch === analyzedPatch) {
+      return { refused: 'This diff is already analyzed — slice --refresh runs it again.' }
+    }
+
+    let provider
+    try {
+      provider = resolveProvider(config.review.provider)
+    } catch (error) {
+      return { refused: error.message }
+    }
+    if (!tryRun(provider.command, provider.versionArgs)) {
+      return { refused: `${provider.name} is not installed — see ${provider.docsUrl}` }
+    }
+
+    writeDiff(now.patch, now.files)
+    runInBackground({
+      ...now,
+      ...analysisPaths(now.patch),
+      conventionFiles: conventionSources(repoRoot, config.review.conventionFiles, { quiet: true }),
+      provider,
+    })
+
+    shownPatch = now.patch
+    shownBase = now.target.baseRev
+    const review = currentReview(now.target, now.files)
+    writeFileSync(reviewPath, JSON.stringify(review, null, 2))
+    return { review, promise: analysisPromise }
+  }
+
+  const reportAnalysis = async () => {
+    if (!analysisPromise) return
+    // The viewer has given the terminal back by the time this line runs,
+    // whether the analysis finished while it was still open or the user quit
+    // first — either way, this is the first point since it kicked off that
+    // printing anything is safe.
+    if (analysisRunning) console.error('  still analyzing — waiting so the result is cached (ctrl-c to give up)')
+    const result = await analysisPromise
+    if (result.failed) {
+      console.error(`  analysis failed${result.reason ? `: ${result.reason}` : ''}; the diff stayed open without it`)
+    } else {
+      printCorrections(result.warnings)
+    }
   }
 
   const live = watching
@@ -947,27 +1038,22 @@ async function main() {
   if (analysisPromise) {
     const review = bareReview({ target, files, config, assessment: runningAssessment })
     writeFileSync(reviewPath, JSON.stringify(review, null, 2))
-    await runViewer({ review, reviewPath, repoRoot, config, warnings: configWarnings, analysisPromise, ...live })
-
-    // The viewer has given the terminal back by the time this line runs,
-    // whether the analysis finished while it was still open or the user quit
-    // first — either way, this is the first point since it kicked off that
-    // printing anything is safe.
-    if (analysisRunning) console.error('  still analyzing — waiting so the result is cached (ctrl-c to give up)')
-    const result = await analysisPromise
-    if (!result) {
-      console.error(
-        `  analysis failed${analysisError ? `: ${analysisError.message}` : ''}; the diff stayed open without it`,
-      )
-    } else {
-      printCorrections(result.warnings)
-    }
-    return
+    await runViewer({
+      review,
+      reviewPath,
+      repoRoot,
+      config,
+      warnings: configWarnings,
+      analysisPromise,
+      analyze,
+      ...live,
+    })
+    return reportAnalysis()
   }
 
   const { review, warnings } = analysis
     ? mergeReview({ target, files, analysis, config })
-    : { review: bareReview({ target, files, config }), warnings: [] }
+    : { review: currentReview(target, files), warnings: [] }
 
   writeFileSync(reviewPath, JSON.stringify(review, null, 2))
 
@@ -977,7 +1063,8 @@ async function main() {
   const slices = review.slices.length
   console.log(`\n  ${slices} slice(s), ${findings} finding(s)\n`)
 
-  await runViewer({ review, reviewPath, repoRoot, config, warnings: configWarnings, ...live })
+  await runViewer({ review, reviewPath, repoRoot, config, warnings: configWarnings, analyze, ...live })
+  await reportAnalysis()
 }
 
 // A stack trace is for whoever is fixing slice, not for whoever is using it.

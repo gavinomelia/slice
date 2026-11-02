@@ -328,6 +328,29 @@ test('--refresh does not quietly reuse the analysis it was asked to redo', () =>
   assert.doesNotMatch(stdout, /using the analysis|using cached analysis/, stdout)
 })
 
+test('--model says so when a cached analysis means it will not be used', () => {
+  const { status, stdout } = slice('cached-branch', '--branch', '--model', 'opus')
+  assert.equal(status, 0, stdout)
+  assert.match(stdout, /--model opus only applies to a new analysis/)
+})
+
+test('--model overrides the configured model', () => {
+  const { stdout } = slice('--print-config', '-m', 'opus')
+  assert.equal(JSON.parse(stdout.slice(stdout.indexOf('{'))).review.model, 'opus')
+})
+
+test('--model needs a value', () => {
+  const { status, stderr } = slice('--model')
+  assert.equal(status, 1)
+  assert.match(stderr, /--model needs a value/)
+})
+
+test('--model alone runs no analysis, so it can wait for the a key', () => {
+  const { status, stdout } = slice('feature-branch', '--branch', '--model', 'opus')
+  assert.equal(status, 0, stdout)
+  assert.match(stdout, /no AI analysis/)
+})
+
 test('probing git does not leak the child stderr', () => {
   // The repo has no remote, so origin/HEAD lookups fail on every run. Those
   // are expected misses and must not surface as "fatal:" noise.
