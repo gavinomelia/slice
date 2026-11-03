@@ -218,3 +218,101 @@ All card data is **tokenised** before it reaches `ledger`.
 [log]: https://example.com/changelog "Changelog"
 
 Untouched closing paragraph.
+
+## Diagram gallery
+
+A flowchart:
+
+```mermaid
+flowchart TD
+    A[Client] --> B{Authenticated?}
+    B -->|yes| C[Gateway]
+    B -->|no| D[Login]
+    C --> E[(Ledger)]
+```
+
+A state machine:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending
+    Pending --> Settled: bank ok
+    Pending --> Failed: declined
+    Settled --> [*]
+```
+
+An ER diagram:
+
+```mermaid
+erDiagram
+    CUSTOMER ||--o{ ORDER : places
+    ORDER ||--|{ LINE : contains
+```
+
+A pie chart, which is not supported:
+
+```mermaid
+pie title Pets
+    "Dogs" : 386
+    "Cats" : 85
+```
+
+A chart much wider than the pane:
+
+```mermaid
+flowchart LR
+  N0[Node 0] --> N1[Node 1]
+  N1[Node 1] --> N2[Node 2]
+  N2[Node 2] --> N3[Node 3]
+  N3[Node 3] --> N4[Node 4]
+  N4[Node 4] --> N5[Node 5]
+  N5[Node 5] --> N6[Node 6]
+  N6[Node 6] --> N7[Node 7]
+  N7[Node 7] --> N8[Node 8]
+  N8[Node 8] --> N9[Node 9]
+  N9[Node 9] --> N10[Node 10]
+  N10[Node 10] --> N11[Node 11]
+  N11[Node 11] --> N12[Node 12]
+  N12[Node 12] --> N13[Node 13]
+  N13[Node 13] --> N14[Node 14]
+```
+
+A chart big enough to hang the renderer:
+
+```mermaid
+flowchart LR
+  N0[Node 0] --> N1[Node 1]
+  N1[Node 1] --> N2[Node 2]
+  N2[Node 2] --> N3[Node 3]
+  N3[Node 3] --> N4[Node 4]
+  N4[Node 4] --> N5[Node 5]
+  N5[Node 5] --> N6[Node 6]
+  N6[Node 6] --> N7[Node 7]
+  N7[Node 7] --> N8[Node 8]
+  N8[Node 8] --> N9[Node 9]
+  N9[Node 9] --> N10[Node 10]
+  N10[Node 10] --> N11[Node 11]
+  N11[Node 11] --> N12[Node 12]
+  N12[Node 12] --> N13[Node 13]
+  N13[Node 13] --> N14[Node 14]
+  N14[Node 14] --> N15[Node 15]
+  N15[Node 15] --> N16[Node 16]
+  N16[Node 16] --> N17[Node 17]
+  N17[Node 17] --> N18[Node 18]
+  N18[Node 18] --> N19[Node 19]
+  N19[Node 19] --> N20[Node 20]
+  N20[Node 20] --> N21[Node 21]
+  N21[Node 21] --> N22[Node 22]
+  N22[Node 22] --> N23[Node 23]
+  N23[Node 23] --> N24[Node 24]
+  N24[Node 24] --> N25[Node 25]
+  N25[Node 25] --> N26[Node 26]
+  N26[Node 26] --> N27[Node 27]
+  N27[Node 27] --> N28[Node 28]
+  N28[Node 28] --> N29[Node 29]
+  N29[Node 29] --> N30[Node 30]
+  N30[Node 30] --> N31[Node 31]
+  N31[Node 31] --> N32[Node 32]
+```
+
+The end, with [a real link](https://example.com/end).
