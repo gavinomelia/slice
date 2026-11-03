@@ -274,6 +274,12 @@ function tableLines(tokens, width, base) {
   return lines
 }
 
+function headingStyle(tag) {
+  if (tag === 'h1') return { bold: true, underline: true, color: colors.heading }
+  if (tag === 'h2') return { bold: true, color: colors.heading }
+  return { bold: true }
+}
+
 function blockLines(tokens, width, base, cursor) {
   const lines = []
 
@@ -293,7 +299,7 @@ function blockLines(tokens, width, base, cursor) {
         cursor.line = token.map[1]
         break
       case 'heading_open':
-        lines.push(...wrapSegments(inlineSegments(inner[0].children, { ...base, bold: true }), width))
+        lines.push(...wrapSegments(inlineSegments(inner[0].children, { ...base, ...headingStyle(token.tag) }), width))
         cursor.line = token.map[1]
         break
       case 'hr':

@@ -132,6 +132,12 @@ Config is JSONC rather than JavaScript, so checking out a branch can never
 run code. `allowedTools`, `promptFile`, `provider`, `model`, and `effort`
 are only read from your own config. slice warns if a repo tries to set them.
 
+## Reading markdown
+
+`slice README.md` renders a markdown file in the terminal, with tables, syntax
+highlighted code, and your theme. It needs no git, `gh`, or model. Piped, it
+prints the rendered text instead, so `slice README.md | less` works too.
+
 ## Cache
 
 Patches, analyses, drafts, and read marks live in
