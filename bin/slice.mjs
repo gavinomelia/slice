@@ -243,7 +243,7 @@ function resolvePrTarget(repoRoot, ref) {
   }
 }
 
-function resolveBranchTarget(repoRoot, base, ref = null) {
+function resolveBranchTarget(repoRoot, base, ref = null, repo = repoName(repoRoot) ?? '') {
   const headRev = ref
     ? ['refs/heads/' + ref, 'refs/remotes/origin/' + ref].find((candidate) =>
         tryRun('git', ['rev-parse', '--verify', '--quiet', candidate], { cwd: repoRoot }),
@@ -255,7 +255,7 @@ function resolveBranchTarget(repoRoot, base, ref = null) {
   const baseRef = base ?? defaultBranch(repoRoot)
   return {
     kind: 'branch',
-    repo: repoName(repoRoot) ?? '',
+    repo,
     number: null,
     title: tryRun('git', ['log', '-1', '--pretty=%s', headRev], { cwd: repoRoot }) ?? headRef,
     author: tryRun('git', ['config', 'user.name'], { cwd: repoRoot }) ?? 'you',
@@ -411,11 +411,11 @@ function capturePatch(repoRoot, target) {
   if (target.kind === 'pr') {
     const args = ['pr', 'diff', String(target.number), ...(target.repo ? ['--repo', target.repo] : [])]
     const patch = tryRun('gh', args, { cwd: repoRoot })
-    if (patch === null) fail(`could not read the diff for PR #${target.number}`)
+    if (patch === null) throw new Error(`could not read the diff for PR #${target.number}`)
     return patch
   }
   if (!tryRun('git', ['rev-parse', '--verify', target.baseRef], { cwd: repoRoot })) {
-    fail(`base ref "${target.baseRef}" does not exist locally`)
+    throw new Error(`base ref "${target.baseRef}" does not exist locally`)
   }
   return run('git', ['diff', `${target.baseRef}...${target.headRev ?? 'HEAD'}`], { cwd: repoRoot })
 }
@@ -967,13 +967,36 @@ async function main() {
     return { target: next, patch: nextPatch, files: orderByPaths(changed, worktreeOrder(repoRoot, changed)) }
   }
 
-  let shownPatch = patch
-  let shownBase = target.baseRev
+  const committedNow = () => {
+    const next =
+      target.kind === 'pr'
+        ? resolvePrTarget(repoRoot, target.number)
+        : resolveBranchTarget(repoRoot, target.baseRef, target.headRef === 'HEAD' ? null : target.headRef, target.repo)
+    if (!next) {
+      throw new Error(target.kind === 'pr' ? `could not read PR #${target.number}` : `no branch ${target.headRef}`)
+    }
+    const nextPatch = capturePatch(repoRoot, next)
+    const changed = splitPatch(nextPatch)
+    return { target: next, patch: nextPatch, files: orderByPaths(changed, commitOrder(repoRoot, next)) }
+  }
+
+  const unchangedNote = () => {
+    if (target.kind === 'pr') {
+      return `PR #${target.number} is unchanged on GitHub — local work shows once pushed, or under slice -w.`
+    }
+    if (target.kind === 'branch' && tryRun('git', ['status', '--porcelain'], { cwd: repoRoot })) {
+      return 'No new commits — uncommitted changes show under slice -w.'
+    }
+    return 'The diff is already up to date.'
+  }
+
+  let shown = { target, patch, files }
   const reload = ({ force = false } = {}) => {
-    const next = worktreeNow()
-    if (!force && next.patch === shownPatch && next.target.baseRev === shownBase) return null
-    shownPatch = next.patch
-    shownBase = next.target.baseRev
+    const next = target.kind === 'worktree' ? worktreeNow() : committedNow()
+    if (!force && next.patch === shown.patch && next.target.baseRev === shown.target.baseRev) {
+      return { unchanged: true, note: unchangedNote() }
+    }
+    shown = next
 
     const review = currentReview(next.target, next.files)
     writeFileSync(reviewPath, JSON.stringify(review, null, 2))
@@ -983,8 +1006,15 @@ async function main() {
   const analyze = () => {
     if (analysisRunning) return { refused: 'The analysis is already running.' }
 
-    const now = target.kind === 'worktree' ? worktreeNow() : { target, patch, files }
-    if (now.files.length === 0) return { refused: 'Nothing to analyze — the working tree is clean.' }
+    const now = target.kind === 'worktree' ? worktreeNow() : shown
+    if (now.files.length === 0) {
+      return {
+        refused:
+          target.kind === 'worktree'
+            ? 'Nothing to analyze — the working tree is clean.'
+            : 'Nothing to analyze — the diff is empty.',
+      }
+    }
     if (analysis && now.patch === analyzedPatch) {
       return { refused: 'This diff is already analyzed — slice --refresh runs it again.' }
     }
@@ -1007,8 +1037,7 @@ async function main() {
       provider,
     })
 
-    shownPatch = now.patch
-    shownBase = now.target.baseRev
+    shown = now
     const review = currentReview(now.target, now.files)
     writeFileSync(reviewPath, JSON.stringify(review, null, 2))
     return { review, promise: analysisPromise }
@@ -1029,11 +1058,7 @@ async function main() {
     }
   }
 
-  const live = watching
-    ? { reload, watch: (handlers) => watchWorktree(repoRoot, handlers) }
-    : target.kind === 'worktree'
-      ? { reload }
-      : {}
+  const live = watching ? { reload, watch: (handlers) => watchWorktree(repoRoot, handlers) } : { reload }
 
   if (analysisPromise) {
     const review = bareReview({ target, files, config, assessment: runningAssessment })

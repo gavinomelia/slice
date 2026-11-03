@@ -446,18 +446,25 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
 
   const applyReload = ({ force = false, quiet = false } = {}) => {
     if (!reload) {
-      return setStatus({ tone: theme.ui.muted, text: 'Only uncommitted changes reload — open them with slice -w.' })
+      return setStatus({ tone: theme.ui.muted, text: 'A review opened with --open cannot be reloaded.' })
     }
+    if (quiet) return reloadNow({ force, quiet })
 
+    setStatus({ tone: theme.ui.muted, text: 'Reloading…', ms: null })
+    setTimeout(() => reloadNow({ force, quiet }), 50)
+  }
+  reloadRef.current = applyReload
+
+  const reloadNow = ({ force, quiet }) => {
     let next
     try {
       next = reload({ force })
     } catch (error) {
       return setStatus({ tone: theme.risk.high, text: `Reload failed: ${error.message}` })
     }
-    if (!next) return quiet || setStatus({ tone: theme.ui.muted, text: 'The diff is already up to date.' })
+    if (next.unchanged) return quiet || setStatus({ tone: theme.ui.muted, text: next.note })
     reloaded.current = true
-    adopt(next.review)
+    adoptRef.current(next.review)
 
     const count = Object.keys(next.review.files).length
     setStatus({
@@ -466,7 +473,6 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
       ms: next.stale ? 4000 : 1500,
     })
   }
-  reloadRef.current = applyReload
 
   const startAnalysis = () => {
     if (!analyze) {
