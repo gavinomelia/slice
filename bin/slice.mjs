@@ -32,7 +32,7 @@ Usage:
   slice my-branch    review that branch's PR, or diff the branch if it has none
   slice --branch     review the local branch diff, ignoring any open PR
   slice -w           review what you have not committed yet
-  slice README.md    read a markdown file, rendered; no git, gh, or model needed
+  slice README.md    read a markdown or mermaid file, rendered; no git, gh, or model
 
   By default this just opens the diff in the viewer — no model runs. Pass
   --ai, or press a in the viewer, for the AI-analyzed review: slices, a
@@ -187,7 +187,7 @@ function parseArgs(argv) {
     // matters once we know whether a PR came back.
     else options.ref = arg
   }
-  if (options.ref && /\.(md|markdown)$/i.test(options.ref)) {
+  if (options.ref && /\.(md|markdown|mmd|mermaid)$/i.test(options.ref)) {
     const conflicting = [
       options.analyze && '--ai',
       options.prompt && '--prompt',

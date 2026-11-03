@@ -12,12 +12,20 @@ import { createElement as h, useEffect, useMemo, useRef, useState } from 'react'
 import { Box, Text, render, useApp, useInput, useStdout } from 'ink'
 
 import { buildRows, codeHighlighter, resolveSyntaxTheme, splitRows } from './render.mjs'
-import { padSegments, plain, segmentsWidth, setCodeHighlighter, setMarkdownTheme, sliceSegments } from './markdown.mjs'
+import {
+  clean,
+  padSegments,
+  plain,
+  segmentsWidth,
+  setCodeHighlighter,
+  setMarkdownTheme,
+  sliceSegments,
+} from './markdown.mjs'
 import { draftsCard, findingLines, findingsFor, keysCard, overviewCard, severityGlyphs, sliceCard } from './cards.mjs'
 import { composeInEditor, loadDrafts, saveDrafts, seedFromFinding } from './compose.mjs'
 import { partitionDrafts, postReview } from './github.mjs'
 import { copyToClipboard, handOff } from './handoff.mjs'
-import { canRender, lineAtRow, loadFileText, renderedLines, rowForLine } from './rendered.mjs'
+import { canRender, lineAtRow, loadDocument, renderedLines, rowForLine } from './rendered.mjs'
 import { isEmptySelection, markRange, parseMouse, rangeOn, selectedText } from './selection.mjs'
 import { buildTree, cellAt, draftKey, rowHasLine, sideAt, windowFor } from './tree.mjs'
 import { loadReviewed, nextUnreviewed, pathsForRow, saveReviewed, sliceReviewed, toggleReviewed } from './progress.mjs'
@@ -333,11 +341,24 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
   }, [path, file?.patch, ui.syntax, layout.tabWidth])
 
   useEffect(() => {
+    let live = true
+    ;(async () => {
+      for (const candidate of Object.values(review.files)) {
+        if (!live) return
+        if (canRender(candidate)) await loadDocument({ file: candidate, target: review.target, repoRoot })
+      }
+    })()
+    return () => {
+      live = false
+    }
+  }, [review.files, review.target, repoRoot])
+
+  useEffect(() => {
     if (!canRender(file)) return setMarkdownText(null)
     let live = true
-    loadFileText({ file, target: review.target, repoRoot }).then((value) => {
+    loadDocument({ file, target: review.target, repoRoot }).then(({ value, diagrams }) => {
       if (!live) return
-      setMarkdownText({ path, value })
+      setMarkdownText({ path, value, diagrams })
       if (value == null) {
         setStatus({ tone: theme.risk.medium, text: `Could not load ${path} to render it, so this is its diff.` })
       }
@@ -396,9 +417,16 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
   const rendered = useMemo(
     () =>
       current?.type === 'file' && renderMarkdown && markdownText?.path === path && markdownText.value != null
-        ? renderedLines(markdownText.value, rows, inner(diffWidth), theme)
+        ? renderedLines(markdownText.value, rows, inner(diffWidth), theme, markdownText.diagrams)
         : null,
     [current, renderMarkdown, markdownText, path, rows, diffWidth, theme],
+  )
+
+  const renderPending = current?.type === 'file' && renderMarkdown && canRender(file) && markdownText?.path !== path
+
+  const renderedWidest = useMemo(
+    () => (rendered ? rendered.reduce((most, line) => Math.max(most, segmentsWidth(line)), 0) : 0),
+    [rendered],
   )
 
   useEffect(() => {
@@ -412,8 +440,14 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
     if (current?.type === 'overview') return overviewCard(review, inner(diffWidth), ui)
     if (current?.type === 'slice') return sliceCard(review, slice, reviewed, inner(diffWidth), ui)
     if (current?.type === 'drafts') return draftsCard(review, drafts, inner(diffWidth), ui)
+    if (renderPending) return [plain('rendering…', { color: theme.ui.muted })]
+    if (rendered && hOffset > 0) {
+      return rendered.map((line) =>
+        line.length === 0 ? line : [line[0], ...sliceSegments(line.slice(1), hOffset, inner(diffWidth) - 2)],
+      )
+    }
     return rendered
-  }, [showKeys, review, current, slice, drafts, reviewed, diffWidth, ui, rendered])
+  }, [showKeys, review, current, slice, drafts, reviewed, diffWidth, ui, rendered, renderPending, hOffset, theme])
 
   const draftAt = useMemo(() => {
     const index = new Map()
@@ -554,7 +588,9 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
 
   /** Write or edit the draft on the cursor's line; an empty body deletes it. */
   const commentOnCursor = async () => {
-    if (rendered) return setStatus({ tone: theme.risk.medium, text: 'Press m for the diff to comment on a line.' })
+    if (rendered || renderPending) {
+      return setStatus({ tone: theme.risk.medium, text: 'Press m for the diff to comment on a line.' })
+    }
     const row = cellAt(view[cursor], side)
     if (!path || !row || !row.line) {
       return setStatus({ tone: theme.risk.medium, text: 'Put the cursor on a diff line first (↑/↓).' })
@@ -743,6 +779,7 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
   const widest = useMemo(() => rows.reduce((max, row) => Math.max(max, row.text?.length ?? 0), 0), [rows])
   const toggleRendered = () => {
     if (!canRender(file)) return
+    if (renderPending) return setRenderMarkdown(false)
     if (rendered) {
       const line = lineAtRow(rendered, centreTop)
       const at = line ? view.findIndex((row) => rowHasLine(row, line)) : -1
@@ -754,8 +791,10 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
     }
   }
 
-  const scrollSide = (delta) =>
-    setHOffset((x) => Math.max(0, Math.min(Math.max(0, widest - codeWidth + 2), x + delta * layout.hScrollStep)))
+  const scrollSide = (delta) => {
+    const most = rendered ? renderedWidest - inner(diffWidth) + 1 : widest - codeWidth + 2
+    setHOffset((x) => Math.max(0, Math.min(Math.max(0, most), x + delta * layout.hScrollStep)))
+  }
 
   // Key repeat arrives coalesced — holding j delivers "jjjj" as one input, and
   // matching on the whole string would drop all but the first. Split plain
@@ -919,7 +958,7 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
 
     // Sideways only means something over a diff; a card is already wrapped to
     // the pane, so there is nothing off screen to reach.
-    if (!centre) {
+    if (!centre || rendered) {
       if (input === 'l' || key.rightArrow) return scrollSide(1)
       if (input === 'h' || key.leftArrow) return scrollSide(-1)
       if (input === '0') return setHOffset(0)
@@ -965,6 +1004,7 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
             ? [
                 path,
                 'rendered',
+                hOffset > 0 ? `→${hOffset}` : '',
                 `${centreTop + 1}-${Math.min(rendered.length, centreTop + bodyHeight)}/${rendered.length}`,
                 zoomed ? 'zoom' : '',
                 reviewed.has(path) ? 'read' : '',
@@ -1114,7 +1154,7 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
   const KEYS = {
     tree: `[j/k] move  [[/]] slice  [x] read  [y] fix  [tab] pane  [n/p] finding${analyze ? '  [a] analyze' : ''}${reload ? '  [r] reload' : ''}  [?] keys  [q] quit`,
     diff: rendered
-      ? '[j/k] scroll  [m] diff  [z] zoom  [x] read  [n/p] finding  [s/A/R] submit  [?] keys'
+      ? '[j/k] scroll  [h/l] sideways  [m] diff  [z] zoom  [x] read  [n/p] finding  [s/A/R] submit  [?] keys'
       : split
         ? '[j/k] line  [H/L] side  [h/l] scroll  [v] unified  [c] comment  [x] read  [s/A/R] submit  [?] keys'
         : '[j/k] line  [h/l] scroll  [v] split  [z] zoom  [c] comment  [x] read  [s/A/R] submit  [?] keys',
@@ -1131,7 +1171,7 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
       h(
         Text,
         { wrap: 'truncate' },
-        h(Text, { bold: true }, review.target.title),
+        h(Text, { bold: true }, clean(review.target.title)),
         h(
           Text,
           { color: theme.ui.muted },

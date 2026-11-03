@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
@@ -9,6 +9,7 @@ import { markdownLines, sourceOf, stripFrontmatter } from '../src/viewer/markdow
 import {
   addedFileText,
   canRender,
+  documentText,
   lineAtRow,
   loadFileText,
   renderedLines,
@@ -154,4 +155,33 @@ test('a wholly removed paragraph marks the block after it', () => {
   const lines = renderedLines('one\n\ntwo', rows, 40, theme)
   assert.equal(mark(lines[0]), undefined)
   assert.equal(mark(lines[2]), 'red')
+})
+
+test('a stalled gh call is abandoned and retried, without touching stdin', async () => {
+  const bin = join(dir, 'fake-bin')
+  const state = join(dir, 'gh-calls')
+  mkdirSync(bin, { recursive: true })
+  writeFileSync(
+    join(bin, 'gh'),
+    `#!/bin/sh\nif [ ! -e "${state}" ]; then touch "${state}"; exec sleep 30; fi\ncat >/dev/null\necho fetched\n`,
+    { mode: 0o755 },
+  )
+  const path = process.env.PATH
+  process.env.PATH = `${bin}:${path}`
+  try {
+    const file = { path: 'b.md', status: 'modified', patch: '' }
+    const target = { kind: 'pr', repo: 'o/r', headSha: 'deadbeef' }
+    const started = Date.now()
+    const text = await loadFileText({ file, target, repoRoot: dir, ghTimeouts: [300, 3000] })
+    assert.equal(text.trim(), 'fetched')
+    assert.ok(Date.now() - started < 3000)
+  } finally {
+    process.env.PATH = path
+  }
+})
+
+test('a mermaid file becomes a document holding one diagram', () => {
+  assert.equal(documentText('a.mmd', 'graph LR; A-->B'), '```mermaid\ngraph LR; A-->B\n```\n')
+  assert.equal(documentText('a.md', '# x'), '# x')
+  assert.equal(canRender({ path: 'flow.mermaid', status: 'modified' }), true)
 })
