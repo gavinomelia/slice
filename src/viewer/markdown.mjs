@@ -188,6 +188,26 @@ export function wrapSegments(segments, width, hanging = '') {
   return lines.map((l, i) => [{ text: i === 0 ? hanging : pad, dim: true }, ...l])
 }
 
+const sources = new WeakMap()
+
+export const sourceOf = (line) => sources.get(line)
+
+const withSource = (lines, map) => {
+  for (const line of lines) if (line.length > 0) sources.set(line, map)
+  return lines
+}
+
+const prefixed = (line, prefix) => {
+  const out = [prefix, ...line]
+  if (sources.has(line)) sources.set(out, sources.get(line))
+  return out
+}
+
+export const stripFrontmatter = (text) =>
+  String(text ?? '').replace(/^---[ \t]*\r?\n(?=[\w-]+:)[\s\S]*?\n---[ \t]*(?:\r?\n|$)/, (match) =>
+    match.replace(/[^\n]/g, ''),
+  )
+
 const closingIndex = (tokens, start) => {
   let depth = 0
   for (let i = start; ; i++) {
@@ -212,7 +232,7 @@ function codeLines(token) {
 function hanging(lines, marker) {
   if (lines.length === 0) return [[{ text: marker, dim: true }]]
   const pad = ' '.repeat(marker.length)
-  return lines.map((line, i) => (line.length === 0 ? [] : [{ text: i === 0 ? marker : pad, dim: true }, ...line]))
+  return lines.map((line, i) => (line.length === 0 ? [] : prefixed(line, { text: i === 0 ? marker : pad, dim: true })))
 }
 
 function tableColumns(rows, width) {
@@ -237,12 +257,14 @@ function alignedCell(line, width, align) {
 
 function tableLines(tokens, width, base) {
   const rows = []
+  const rowSources = []
   let align
   let cellBase = base
 
   for (const token of tokens) {
     if (token.type === 'tr_open') {
       rows.push([])
+      rowSources.push(token.map)
     } else if (token.type === 'th_open' || token.type === 'td_open') {
       align = /text-align:(\w+)/.exec(token.attrGet('style') ?? '')?.[1]
       cellBase = token.type === 'th_open' ? { ...base, bold: true } : base
@@ -260,10 +282,15 @@ function tableLines(tokens, width, base) {
     const height = Math.max(1, ...wrapped.map((cell) => cell.length))
     for (let y = 0; y < height; y++) {
       lines.push(
-        wrapped.flatMap((cell, c) => [
-          ...(c > 0 ? [separator] : []),
-          ...alignedCell(cell[y] ?? [], columns[c], row[c].align),
-        ]),
+        ...withSource(
+          [
+            wrapped.flatMap((cell, c) => [
+              ...(c > 0 ? [separator] : []),
+              ...alignedCell(cell[y] ?? [], columns[c], row[c].align),
+            ]),
+          ],
+          rowSources[r],
+        ),
       )
     }
     if (r === 0) {
@@ -295,11 +322,16 @@ function blockLines(tokens, width, base, cursor) {
 
     switch (token.type) {
       case 'paragraph_open':
-        lines.push(...wrapSegments(inlineSegments(inner[0].children, base), width))
+        lines.push(...withSource(wrapSegments(inlineSegments(inner[0].children, base), width), token.map))
         cursor.line = token.map[1]
         break
       case 'heading_open':
-        lines.push(...wrapSegments(inlineSegments(inner[0].children, { ...base, ...headingStyle(token.tag) }), width))
+        lines.push(
+          ...withSource(
+            wrapSegments(inlineSegments(inner[0].children, { ...base, ...headingStyle(token.tag) }), width),
+            token.map,
+          ),
+        )
         cursor.line = token.map[1]
         break
       case 'hr':
@@ -308,7 +340,7 @@ function blockLines(tokens, width, base, cursor) {
         break
       case 'fence':
       case 'code_block':
-        lines.push(...codeLines(token))
+        lines.push(...withSource(codeLines(token), token.map))
         cursor.line = token.map[1]
         break
       case 'table_open':
@@ -327,7 +359,7 @@ function blockLines(tokens, width, base, cursor) {
       }
       case 'blockquote_open': {
         const quoted = blockLines(inner, width - 2, { ...base, color: colors.quote, dim: true }, cursor)
-        lines.push(...quoted.map((line) => [{ text: '▏ ', dim: true }, ...line]))
+        lines.push(...quoted.map((line) => prefixed(line, { text: '▏ ', dim: true })))
         cursor.line = Math.max(cursor.line, token.map[0] + 1)
         break
       }

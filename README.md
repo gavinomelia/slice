@@ -135,6 +135,10 @@ are only read from your own config. slice warns if a repo tries to set them.
 
 ## Reading markdown
 
+Changed `.md` and `.markdown` files in a review open rendered, with a mark in
+the gutter beside each block that changed. Press `m` to switch to the file's
+diff, which is where line comments go.
+
 `slice README.md` renders a markdown file in the terminal, with tables, syntax
 highlighted code, and your theme. It needs no git, `gh`, or model. Piped, it
 prints the rendered text instead, so `slice README.md | less` works too.
