@@ -22,6 +22,7 @@ import {
 } from '@pierre/diffs'
 
 import { terminalColor } from './ansi.mjs'
+import { clean } from './markdown.mjs'
 
 /**
  * Expand tabs against the running column, not per-segment.
@@ -165,7 +166,7 @@ export async function resolveSyntaxTheme(name) {
  * them from the addition side so the gutter shows post-change line numbers.
  */
 export async function buildRows(file, { theme = DEFAULT_THEMES.dark, tabWidth = 4 } = {}) {
-  const diff = getSingularPatch(file.patch)
+  const diff = getSingularPatch(clean(file.patch))
   diff.lang ??= getFiletypeFromFileName(file.path)
 
   // An unknown extension is not fatal: renderDiffWithHighlighter falls back to

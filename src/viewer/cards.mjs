@@ -224,6 +224,7 @@ const KEY_GROUPS = [
       ['v', 'switch between unified and split'],
       ['H  L', 'in split, the side c comments on'],
       ['z', 'zoom the diff to the full terminal'],
+      ['m', 'switch a markdown file between rendered and its diff'],
     ],
   ],
   [

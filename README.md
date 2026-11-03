@@ -133,6 +133,19 @@ Config is JSONC rather than JavaScript, so checking out a branch can never
 run code. `allowedTools`, `promptFile`, `provider`, `model`, and `effort`
 are only read from your own config. slice warns if a repo tries to set them.
 
+## Reading markdown
+
+Changed `.md`, `.markdown`, `.mmd`, and `.mermaid` files in a review open rendered, with a mark in
+the gutter beside each block that changed. Press `m` to switch to the file's
+diff, which is where line comments go.
+
+Mermaid flowcharts, sequence, state, class, ER, and XY diagrams are drawn as text. Other
+types, and anything too large to draw quickly, stay as source.
+
+`slice README.md` renders a markdown or mermaid file in the terminal, with tables, syntax
+highlighted code, and your theme. It needs no git, `gh`, or model. Piped, it
+prints the rendered text instead, so `slice README.md | less` works too.
+
 ## Cache
 
 Patches, analyses, drafts, and read marks live in
@@ -163,3 +176,8 @@ MIT
 Diff parsing and syntax highlighting come from
 [`@pierre/diffs`](https://www.npmjs.com/package/@pierre/diffs) by Pierre Computer
 Company, used under the Apache License 2.0.
+
+Markdown parsing comes from
+[`markdown-exit`](https://www.npmjs.com/package/markdown-exit), and Mermaid drawing from
+[`beautiful-mermaid`](https://www.npmjs.com/package/beautiful-mermaid), both used under
+the MIT License.
