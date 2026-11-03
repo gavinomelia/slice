@@ -69,9 +69,7 @@ test('a pure removal marks the block that follows it', () => {
   ]
   const lines = renderedLines('one\n\ntwo', rows, 40, theme)
   assert.equal(mark(lines[0]), undefined)
-  assert.equal(mark(lines[2]), undefined)
-  const removed = renderedLines('one\ntwo', rows, 40, theme)
-  assert.equal(mark(removed[0]), 'red')
+  assert.equal(mark(lines[2]), 'red')
 })
 
 test('a removal at the end of a file marks the last block', () => {
@@ -128,4 +126,32 @@ test('a file that cannot be found resolves to null rather than throwing', async 
 test('a working tree path cannot climb out of the repository', async () => {
   const file = { path: '../outside.md', status: 'modified', patch: '' }
   assert.equal(await loadFileText({ file, target: { kind: 'worktree' }, repoRoot: dir }), null)
+})
+
+test('only the changed line of a code fence is marked', () => {
+  const lines = renderedLines('```js\na\nb\nc\n```', [{ kind: 'add', line: 3 }], 40, theme)
+  assert.deepEqual(lines.map(text), ['  │ a', '▌ │ b', '  │ c'])
+})
+
+test('a removal just before a closing fence marks the last code line', () => {
+  const rows = [
+    { kind: 'ctx', line: 2 },
+    { kind: 'del', line: 3 },
+    { kind: 'ctx', line: 3 },
+  ]
+  const lines = renderedLines('```js\na\n```', rows, 40, theme)
+  assert.equal(mark(lines[0]), 'red')
+})
+
+test('a wholly removed paragraph marks the block after it', () => {
+  const rows = [
+    { kind: 'ctx', line: 1 },
+    { kind: 'ctx', line: 2 },
+    { kind: 'del', line: 3 },
+    { kind: 'del', line: 4 },
+    { kind: 'ctx', line: 3 },
+  ]
+  const lines = renderedLines('one\n\ntwo', rows, 40, theme)
+  assert.equal(mark(lines[0]), undefined)
+  assert.equal(mark(lines[2]), 'red')
 })

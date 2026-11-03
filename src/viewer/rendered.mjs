@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
 
-import { markdownLines, sourceOf, stripFrontmatter } from './markdown.mjs'
+import { documentLines, sourceOf } from './markdown.mjs'
 
 const exec = promisify(execFile)
 const MAX_BUFFER = 64 * 1024 * 1024
@@ -92,14 +92,20 @@ function changedLines(rows) {
   return { added, removedAt }
 }
 
-function changeKind(source, { added, removedAt }) {
-  if (!source) return null
-  let kind = null
-  for (let line = source[0] + 1; line <= source[1]; line++) {
-    if (added.has(line)) return 'add'
-    if (removedAt.has(line)) kind = 'del'
+function removalRows(lines, removedAt) {
+  const sourced = lines.filter((line) => sourceOf(line))
+  const rows = new Set()
+  for (const removed of removedAt) {
+    const next = sourced.find((line) => removed <= sourceOf(line)[1]) ?? sourced.at(-1)
+    if (next) rows.add(next)
   }
-  return kind
+  return rows
+}
+
+function isAdded(source, added) {
+  if (!source) return false
+  for (let line = source[0] + 1; line <= source[1]; line++) if (added.has(line)) return true
+  return false
 }
 
 export function renderedLines(text, rows, width, theme) {
@@ -110,9 +116,13 @@ export function renderedLines(text, rows, width, theme) {
   }
   const blank = { text: ' '.repeat(GUTTER) }
 
-  return markdownLines(stripFrontmatter(text), width - GUTTER).map((line) => {
+  const lines = documentLines(text, width - GUTTER)
+  const removed = removalRows(lines, changes.removedAt)
+
+  return lines.map((line) => {
     if (line.length === 0) return line
-    const out = [marks[changeKind(sourceOf(line), changes)] ?? blank, ...line]
+    const kind = isAdded(sourceOf(line), changes.added) ? 'add' : removed.has(line) ? 'del' : null
+    const out = [marks[kind] ?? blank, ...line]
     sourceLines.set(out, sourceOf(line))
     return out
   })
