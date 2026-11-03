@@ -21,7 +21,7 @@ const ASCII = /^[\x20-\x7e]*$/
 const TAB_WIDTH = 4
 const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
 
-const clean = (text) => String(text ?? '').replace(CONTROL, '')
+export const clean = (text) => String(text ?? '').replace(CONTROL, '')
 const textWidth = (text) => (ASCII.test(text) ? text.length : stringWidth(text))
 
 const takeWidth = (text, limit) => {
@@ -161,6 +161,9 @@ function inlineSegments(children, base) {
         break
       case 'html_inline':
         break
+      case 'link_url':
+        out.push({ ...style, text: token.content, color: undefined, underline: false, dim: true })
+        break
       default:
         if (token.content) out.push({ ...style, text: token.content })
     }
@@ -273,6 +276,18 @@ function codeLines(token) {
     sources.set(row, [start + i, i === raws.length - 1 ? token.map[1] : start + i + 1])
     return row
   })
+}
+
+function diagramLines(token, diagrams) {
+  if (!diagrams || token.type !== 'fence' || token.info.trim().split(/\s+/)[0] !== 'mermaid') return null
+  const drawn = diagrams.get(token.content)
+  if (drawn)
+    return withSource(
+      drawn.map((text) => [{ text }]),
+      token.map,
+    )
+  const note = [{ text: 'This diagram could not be drawn, so here is its source.', color: colors.quote, dim: true }]
+  return [...withSource([note], token.map), ...codeLines(token)]
 }
 
 function hanging(lines, marker) {
@@ -402,7 +417,7 @@ function blockLines(tokens, width, base, cursor) {
         break
       case 'fence':
       case 'code_block':
-        lines.push(...codeLines(token))
+        lines.push(...(diagramLines(token, cursor.diagrams) ?? codeLines(token)))
         cursor.line = token.map[1]
         break
       case 'html_block':
@@ -448,8 +463,46 @@ export function markdownLines(text, width) {
   return blockLines(parser.parse(clean(text), {}), width, {}, { line: Infinity })
 }
 
-export const documentLines = (text, width) =>
-  blockLines(documentParser.parse(stripFrontmatter(clean(text)), {}), width, {}, { line: Infinity })
+const parseDocument = (text) => documentParser.parse(stripFrontmatter(clean(text)), {})
+
+const isFence = (token) => token.type === 'fence' && token.info.trim().split(/\s+/)[0] === 'mermaid'
+
+export const mermaidSources = (text) =>
+  parseDocument(text)
+    .filter(isFence)
+    .map((token) => token.content)
+
+function addLinkUrls(tokens) {
+  for (const token of tokens) {
+    if (token.type !== 'inline') continue
+    const children = []
+    let open = null
+    let label = ''
+    let hasImage = false
+    for (const child of token.children) {
+      children.push(child)
+      if (child.type === 'link_open') {
+        open = child
+        label = ''
+        hasImage = false
+      } else if (child.type === 'link_close' && open) {
+        const href = open.attrGet('href') ?? ''
+        if (/^https?:/i.test(href) && !hasImage && label !== href) {
+          children.push({ type: 'link_url', content: ` (${href})` })
+        }
+        open = null
+      } else if (open) {
+        if (child.type === 'image') hasImage = true
+        label += child.content ?? ''
+      }
+    }
+    token.children = children
+  }
+  return tokens
+}
+
+export const documentLines = (text, width, diagrams) =>
+  blockLines(addLinkUrls(parseDocument(text)), width, {}, { line: Infinity, diagrams })
 
 /** Shift rendered lines right, e.g. to sit under a finding's title. */
 export const indentLines = (lines, by) =>
