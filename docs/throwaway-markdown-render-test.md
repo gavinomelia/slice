@@ -1,7 +1,7 @@
 ---
 title: "Payments Platform: Architecture & Operations Handbook"
 owners: [platform, sre]
-status: draft
+status: reviewed
 tags:
   - payments
   - runbook
@@ -14,7 +14,7 @@ Payments Platform Handbook
 
 [![Build](https://img.shields.io/badge/build-passing-green.svg)](https://example.com/ci) [![Coverage](https://img.shields.io/badge/coverage-91%25-green.svg)](https://example.com/cov)
 
-> **Status:** draft. See the [changelog][log] and the [runbook](#runbook "Jump to the runbook").
+> **Status:** reviewed. See the [changelog][log] and the [runbook](#runbook "Jump to the runbook").
 
 Table of contents
 -----------------
@@ -24,6 +24,7 @@ Table of contents
    1. [Services](#services)
    2. [Data flow](#data-flow)
 3. [Runbook](#runbook)
+4. [Security](#security)
 
 ---
 
@@ -49,7 +50,7 @@ Term
 | Service | Language | Owner | SLO | Notes |
 |:--------|:---:|---:|-----:|-------|
 | `api-gateway` | Go | **platform** | 99.99% | Terminates TLS, rate limits, and routes requests to everything behind it |
-| `ledger` | Rust | *finance* | 99.95% | Double entry; see [the design](https://example.com/ledger) |
+| `ledger` | Rust | *finance* | 99.99% | Double entry; see [the design](https://example.com/ledger) |
 | `risk` | Python | ~~ml~~ risk | 99.5% | Pipes \| must be escaped \| in cells |
 | `notify` |  |  |  | Empty cells above |
 
@@ -66,6 +67,7 @@ sequenceDiagram
     participant L as Ledger
     C->>G: POST /charge
     G->>L: reserve(amount)
+    L->>L: journal
     L-->>G: ok
     G-->>C: 201
 ```
@@ -77,7 +79,7 @@ Nested structure, four levels deep:
     - Schema
       - Reject with a 422, and include a long explanation of which field failed so that this deeply nested item has to wrap in the pane
     - Idempotency key
-  - Enqueue
+  - Enqueue with a dead letter queue
 
     A second paragraph inside a list item, separated by a blank line.
 
@@ -99,7 +101,7 @@ Nested structure, four levels deep:
 Task list:
 
 - [x] Write the design
-- [ ] Load test to 10k TPS
+- [x] Load test to 10k TPS
   - [ ] Soak for 24 hours
 - [x] ~~Migrate to Kafka~~
 
@@ -108,10 +110,6 @@ Numbering that starts elsewhere:
 7. seven
 8. eight
 9. nine
-
-* Star bullets
-+ Plus bullets
-- Dash bullets
 
 > Level one quote with `code` and a [link](https://example.com).
 >
@@ -138,7 +136,7 @@ aws route53 change-resource-record-sets --hosted-zone-id Z123 --change-batch "fi
 export async function retry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
   for (let i = 0; i < attempts; i++) {
     try { return await fn() } catch (error) { if (i === attempts - 1) throw error }
-    await sleep(2 ** i * 100)
+    await sleep(2 ** i * 250)
   }
   throw new Error('unreachable')
 }
@@ -207,6 +205,15 @@ Setext two
 * * *
 
 ___
+
+## Security
+
+All card data is **tokenised** before it reaches `ledger`.
+
+| Control | Status |
+|---|---|
+| PCI DSS | ✅ |
+| Key rotation | ⚠️ quarterly |
 
 [log]: https://example.com/changelog "Changelog"
 
