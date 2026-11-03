@@ -8,10 +8,12 @@
  * line array the caller can slice.
  *
  * A line is `Segment[]`; an empty array is a blank line.
- * A segment is `{ text, color?, bg?, bold?, dim?, italic?, underline? }`.
+ * A segment is `{ text, color?, bg?, bold?, dim?, italic?, underline?, strikethrough? }`.
  */
 
-const INLINE = /(`[^`\n]+`|\*\*[^*\n]+\*\*|__[^_\n]+__|\*[^*\n]+\*|(?<![\w])_[^_\n]+_(?![\w])|\[[^\]\n]+\]\([^)\n]+\))/
+import { MarkdownExit } from 'markdown-exit'
+
+const parser = new MarkdownExit()
 
 /**
  * Colours, replaced wholesale by the app once config is resolved.
@@ -78,36 +80,59 @@ export function padSegments(segments, width, style) {
   return short > 0 ? [...segments, { ...style, text: ' '.repeat(short) }] : segments
 }
 
-/** Split one line of markdown into styled segments. */
-export function parseInline(text, base = {}) {
+function inlineSegments(children, base) {
   const out = []
-  let rest = String(text ?? '')
+  const stack = []
+  let style = base
 
-  while (rest) {
-    const match = INLINE.exec(rest)
-    if (!match) {
-      if (rest) out.push({ ...base, text: rest })
-      break
+  const open = (extra) => {
+    stack.push(style)
+    style = { ...style, ...extra }
+  }
+
+  for (const token of children) {
+    switch (token.type) {
+      case 'strong_open':
+        open({ bold: true })
+        break
+      case 'em_open':
+        open({ italic: true })
+        break
+      case 's_open':
+        open({ strikethrough: true })
+        break
+      case 'link_open':
+        open({ color: colors.link, underline: true })
+        break
+      case 'strong_close':
+      case 'em_close':
+      case 's_close':
+      case 'link_close':
+        style = stack.pop()
+        break
+      case 'code_inline':
+        // Code spans drop the surrounding dim: a greyed-out identifier is the
+        // one thing in a finding you most want to be able to read.
+        out.push({ ...style, text: token.content, color: colors.code, bg: colors.codeBg, dim: false })
+        break
+      case 'softbreak':
+        out.push({ ...style, text: ' ' })
+        break
+      case 'hardbreak':
+        out.push({ ...style, text: '\n' })
+        break
+      default:
+        if (token.content) out.push({ ...style, text: token.content })
     }
-    if (match.index > 0) out.push({ ...base, text: rest.slice(0, match.index) })
-
-    const token = match[0]
-    if (token.startsWith('`')) {
-      // Code spans drop the surrounding dim: a greyed-out identifier is the
-      // one thing in a finding you most want to be able to read.
-      out.push({ ...base, text: token.slice(1, -1), color: colors.code, bg: colors.codeBg, dim: false })
-    } else if (token.startsWith('**') || token.startsWith('__')) {
-      out.push({ ...base, text: token.slice(2, -2), bold: true })
-    } else if (token.startsWith('[')) {
-      out.push({ ...base, text: /\[([^\]]+)\]/.exec(token)[1], color: colors.link, underline: true })
-    } else {
-      out.push({ ...base, text: token.slice(1, -1), italic: true })
-    }
-
-    rest = rest.slice(match.index + token.length)
   }
 
   return out
+}
+
+/** Split one line of markdown into styled segments. */
+export function parseInline(text, base = {}) {
+  const [inline] = parser.parseInline(String(text ?? ''), {})
+  return inlineSegments(inline?.children ?? [], base)
 }
 
 /**
@@ -134,6 +159,10 @@ export function wrapSegments(segments, width, hanging = '') {
       if (!part) continue
 
       if (/^\s+$/.test(part)) {
+        if (part.includes('\n')) {
+          flush()
+          continue
+        }
         if (length > 0 && length < inner) {
           line.push({ ...segment, text: ' ' })
           length++
@@ -159,12 +188,145 @@ export function wrapSegments(segments, width, hanging = '') {
   return lines.map((l, i) => [{ text: i === 0 ? hanging : pad, dim: true }, ...l])
 }
 
-const FENCE = /^\s*```(\w*)\s*$/
-const HEADING = /^(#{1,6})\s+(.*)$/
-const BULLET = /^(\s*)[-*+]\s+(.*)$/
-const ORDERED = /^(\s*)(\d+)[.)]\s+(.*)$/
-const QUOTE = /^\s*>\s?(.*)$/
-const RULE = /^\s*([-*_])\s*(\1\s*){2,}$/
+const closingIndex = (tokens, start) => {
+  let depth = 0
+  for (let i = start; ; i++) {
+    depth += tokens[i].nesting
+    if (depth === 0) return i
+  }
+}
+
+// Code keeps its own line breaks and indentation; wrapping it would be a lie
+// about the code, so over-wide lines are left for the pane to truncate.
+function codeLines(token) {
+  if (!token.content) return []
+  const code = token.content.replace(/\n$/, '')
+  const lang = token.info.trim().split(/\s+/)[0]
+  const highlighted = highlightCode?.(code, lang)
+  return code.split('\n').map((raw, i) => {
+    const segments = highlighted?.[i]?.length ? highlighted[i] : [{ text: raw, color: colors.fence }]
+    return [{ text: '│ ', dim: true }, ...segments]
+  })
+}
+
+function hanging(lines, marker) {
+  if (lines.length === 0) return [[{ text: marker, dim: true }]]
+  const pad = ' '.repeat(marker.length)
+  return lines.map((line, i) => (line.length === 0 ? [] : [{ text: i === 0 ? marker : pad, dim: true }, ...line]))
+}
+
+function tableColumns(rows, width) {
+  const natural = rows[0].map((_, c) => Math.max(...rows.map((row) => segmentsWidth(row[c].segments))))
+  const available = width - 3 * (natural.length - 1)
+  const total = (cap) => natural.reduce((sum, w) => sum + Math.min(w, cap), 0)
+  let cap = Math.max(...natural)
+  while (cap > 8 && total(cap) > available) cap--
+  return natural.map((w) => Math.min(w, cap))
+}
+
+function alignedCell(line, width, align) {
+  const short = Math.max(0, width - segmentsWidth(line))
+  const left = align === 'right' ? short : align === 'center' ? short >> 1 : 0
+  return [{ text: ' '.repeat(left) }, ...line, { text: ' '.repeat(short - left) }]
+}
+
+function tableLines(tokens, width, base) {
+  const rows = []
+  let align
+  let cellBase = base
+
+  for (const token of tokens) {
+    if (token.type === 'tr_open') {
+      rows.push([])
+    } else if (token.type === 'th_open' || token.type === 'td_open') {
+      align = /text-align:(\w+)/.exec(token.attrGet('style') ?? '')?.[1]
+      cellBase = token.type === 'th_open' ? { ...base, bold: true } : base
+    } else if (token.type === 'inline') {
+      rows.at(-1).push({ align, segments: inlineSegments(token.children, cellBase) })
+    }
+  }
+
+  const columns = tableColumns(rows, width)
+  const separator = { text: ' │ ', color: colors.rule, dim: true }
+  const lines = []
+
+  rows.forEach((row, r) => {
+    const wrapped = row.map((cell, c) => wrapSegments(cell.segments, columns[c]))
+    const height = Math.max(1, ...wrapped.map((cell) => cell.length))
+    for (let y = 0; y < height; y++) {
+      lines.push(
+        wrapped.flatMap((cell, c) => [
+          ...(c > 0 ? [separator] : []),
+          ...alignedCell(cell[y] ?? [], columns[c], row[c].align),
+        ]),
+      )
+    }
+    if (r === 0) {
+      lines.push([{ text: columns.map((w) => '─'.repeat(w)).join('─┼─'), color: colors.rule, dim: true }])
+    }
+  })
+
+  return lines
+}
+
+function blockLines(tokens, width, base, cursor) {
+  const lines = []
+
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]
+    if (!token.map) continue
+
+    if (token.map[0] > cursor.line) lines.push([])
+    cursor.line = token.map[0]
+
+    const end = token.nesting === 1 ? closingIndex(tokens, i) : i
+    const inner = tokens.slice(i + 1, end)
+
+    switch (token.type) {
+      case 'paragraph_open':
+        lines.push(...wrapSegments(inlineSegments(inner[0].children, base), width))
+        cursor.line = token.map[1]
+        break
+      case 'heading_open':
+        lines.push(...wrapSegments(inlineSegments(inner[0].children, { ...base, bold: true }), width))
+        cursor.line = token.map[1]
+        break
+      case 'hr':
+        lines.push([{ text: '─'.repeat(Math.max(4, Math.min(width, 24))), color: colors.rule, dim: true }])
+        cursor.line = token.map[1]
+        break
+      case 'fence':
+      case 'code_block':
+        lines.push(...codeLines(token))
+        cursor.line = token.map[1]
+        break
+      case 'table_open':
+        lines.push(...tableLines(inner, width, base))
+        cursor.line = token.map[1]
+        break
+      case 'bullet_list_open':
+      case 'ordered_list_open':
+        lines.push(...blockLines(inner, width, base, cursor))
+        break
+      case 'list_item_open': {
+        const marker = token.info ? `${token.info}. ` : '• '
+        lines.push(...hanging(blockLines(inner, width - marker.length, base, cursor), marker))
+        cursor.line = Math.max(cursor.line, token.map[0] + 1)
+        break
+      }
+      case 'blockquote_open': {
+        const quoted = blockLines(inner, width - 2, { ...base, color: colors.quote, dim: true }, cursor)
+        lines.push(...quoted.map((line) => [{ text: '▏ ', dim: true }, ...line]))
+        cursor.line = Math.max(cursor.line, token.map[0] + 1)
+        break
+      }
+    }
+
+    i = end
+  }
+
+  return lines
+}
 
 /**
  * Render markdown to wrapped, styled lines.
@@ -174,92 +336,7 @@ const RULE = /^\s*([-*_])\s*(\1\s*){2,}$/
  * against the pane width.
  */
 export function markdownLines(text, width) {
-  const lines = []
-  let paragraph = []
-  let fenced = false
-  let lang = ''
-  let code = []
-
-  const flushParagraph = () => {
-    if (paragraph.length === 0) return
-    lines.push(...wrapSegments(parseInline(paragraph.join(' ')), width))
-    paragraph = []
-  }
-
-  // Code keeps its own line breaks and indentation; wrapping it would be a lie
-  // about the code, so over-wide lines are left for the pane to truncate.
-  const flushCode = () => {
-    const highlighted = code.length > 0 ? highlightCode?.(code.join('\n'), lang) : null
-    code.forEach((raw, i) => {
-      const segments = highlighted?.[i]?.length ? highlighted[i] : [{ text: raw, color: colors.fence }]
-      lines.push([{ text: '│ ', dim: true }, ...segments])
-    })
-    code = []
-  }
-
-  for (const raw of String(text ?? '').split('\n')) {
-    const fence = FENCE.exec(raw)
-    if (fence) {
-      if (fenced) flushCode()
-      else flushParagraph()
-      fenced = !fenced
-      lang = fenced ? fence[1] : ''
-      continue
-    }
-
-    if (fenced) {
-      code.push(raw)
-      continue
-    }
-
-    if (!raw.trim()) {
-      flushParagraph()
-      lines.push([])
-      continue
-    }
-
-    if (RULE.test(raw)) {
-      flushParagraph()
-      lines.push([{ text: '─'.repeat(Math.max(4, Math.min(width, 24))), color: colors.rule, dim: true }])
-      continue
-    }
-
-    const heading = HEADING.exec(raw)
-    if (heading) {
-      flushParagraph()
-      lines.push(...wrapSegments(parseInline(heading[2], { bold: true }), width))
-      continue
-    }
-
-    const bullet = BULLET.exec(raw)
-    if (bullet) {
-      flushParagraph()
-      lines.push(...wrapSegments(parseInline(bullet[2]), width, `${' '.repeat(bullet[1].length)}• `))
-      continue
-    }
-
-    const ordered = ORDERED.exec(raw)
-    if (ordered) {
-      flushParagraph()
-      lines.push(...wrapSegments(parseInline(ordered[3]), width, `${' '.repeat(ordered[1].length)}${ordered[2]}. `))
-      continue
-    }
-
-    const quote = QUOTE.exec(raw)
-    if (quote) {
-      flushParagraph()
-      lines.push(...wrapSegments(parseInline(quote[1], { color: colors.quote, dim: true }), width, '▏ '))
-      continue
-    }
-
-    paragraph.push(raw.trim())
-  }
-
-  // An unterminated fence is common in truncated model output; render what we
-  // have rather than dropping it.
-  if (fenced) flushCode()
-  flushParagraph()
-  return lines
+  return blockLines(parser.parse(String(text ?? ''), {}), width, {}, { line: Infinity })
 }
 
 /** Shift rendered lines right, e.g. to sit under a finding's title. */
