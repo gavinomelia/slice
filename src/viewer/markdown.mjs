@@ -221,7 +221,12 @@ function tableColumns(rows, width) {
   const total = (cap) => natural.reduce((sum, w) => sum + Math.min(w, cap), 0)
   let cap = Math.max(...natural)
   while (cap > 8 && total(cap) > available) cap--
-  return natural.map((w) => Math.min(w, cap))
+  let spare = Math.max(0, available - total(cap))
+  return natural.map((w) => {
+    const extra = Math.min(spare, Math.max(0, w - cap))
+    spare -= extra
+    return Math.min(w, cap) + extra
+  })
 }
 
 function alignedCell(line, width, align) {
