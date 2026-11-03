@@ -197,6 +197,13 @@ test('a table wider than the pane wraps its cells instead of losing them', () =>
   assert.equal(left.join(' ').replace(/\s+/g, ' ').trim(), words)
 })
 
+test('a narrow table spends its spare width before breaking a word', () => {
+  const notes = 'backoff never resets so a long outage waits far longer'
+  const lines = markdownLines(`| Path | Risk | Notes |\n|---|---|---|\n| w/math.ts | high | ${notes} |`, 27)
+  assert.ok(text(lines[2]).startsWith('w/math.ts │'), text(lines[2]))
+  for (const line of lines) assert.ok(segmentsWidth(line) <= 27, text(line))
+})
+
 test('deeply nested input does not throw', () => {
   assert.doesNotThrow(() => markdownLines('> '.repeat(20000) + 'a', 40))
   assert.doesNotThrow(() => markdownLines('- '.repeat(5000) + 'a', 40))
