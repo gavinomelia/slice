@@ -240,6 +240,8 @@ const KEY_GROUPS = [
   [
     'GENERAL',
     [
+      ['drag', 'select within one pane and copy it'],
+      ['shift-drag', "the terminal's own selection"],
       ['?', 'show or hide this'],
       ['esc', 'dismiss the status line'],
       ['q  ctrl-c', 'quit'],

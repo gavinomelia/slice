@@ -1,3 +1,6 @@
+export const MOUSE_ON = '\x1b[?1002h\x1b[?1006h'
+export const MOUSE_OFF = '\x1b[?1006l\x1b[?1002l'
+
 const OSC_COLOR = (slot) => new RegExp(`\\x1b\\]${slot};rgba?:([0-9a-f]{1,4})\\/([0-9a-f]{1,4})\\/([0-9a-f]{1,4})`, 'i')
 const DEVICE_ATTRIBUTES = /\x1b\[\?[\d;]*c/
 
