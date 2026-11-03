@@ -17,6 +17,7 @@ import { draftsCard, findingLines, findingsFor, keysCard, overviewCard, severity
 import { composeInEditor, loadDrafts, saveDrafts, seedFromFinding } from './compose.mjs'
 import { partitionDrafts, postReview } from './github.mjs'
 import { handOff } from './handoff.mjs'
+import { canRender, lineAtRow, loadFileText, renderedLines, rowForLine } from './rendered.mjs'
 import { buildTree, cellAt, draftKey, rowHasLine, sideAt, windowFor } from './tree.mjs'
 import { loadReviewed, nextUnreviewed, pathsForRow, saveReviewed, sliceReviewed, toggleReviewed } from './progress.mjs'
 import { parseHex } from '../config/color.mjs'
@@ -137,6 +138,9 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
   const [cursor, setCursor] = useState(0)
   const [hOffset, setHOffset] = useState(0)
   const [findingIndex, setFindingIndex] = useState(0)
+  const [renderMarkdown, setRenderMarkdown] = useState(true)
+  const [markdownText, setMarkdownText] = useState(null)
+  const [renderedJump, setRenderedJump] = useState(null)
   const [rows, setRows] = useState([])
   const [loading, setLoading] = useState(false)
   const [drafts, setDrafts] = useState(() => loadDrafts(reviewPath))
@@ -316,6 +320,21 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
     }
   }, [path, file?.patch, ui.syntax, layout.tabWidth])
 
+  useEffect(() => {
+    if (!canRender(file)) return setMarkdownText(null)
+    let live = true
+    loadFileText({ file, target: review.target, repoRoot }).then((value) => {
+      if (!live) return
+      setMarkdownText({ path, value })
+      if (value == null) {
+        setStatus({ tone: theme.risk.medium, text: `Could not load ${path} to render it, so this is its diff.` })
+      }
+    })
+    return () => {
+      live = false
+    }
+  }, [path, file?.patch, review.target, repoRoot])
+
   // Chrome: header 2, footer 1, pane border 2 + title 1, and one spare row.
   //
   // The spare row is load-bearing. Ink only does an in-place diff while the
@@ -362,13 +381,27 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
   const halfWidth = Math.floor((inner(diffWidth) - 1) / 2)
   const codeWidth = Math.max(8, (split ? halfWidth : inner(diffWidth)) - 8)
 
+  const rendered = useMemo(
+    () =>
+      current?.type === 'file' && renderMarkdown && markdownText?.path === path && markdownText.value != null
+        ? renderedLines(markdownText.value, rows, inner(diffWidth), theme)
+        : null,
+    [current, renderMarkdown, markdownText, path, rows, diffWidth, theme],
+  )
+
+  useEffect(() => {
+    if (!renderedJump || !rendered || loading) return
+    setScroll(rowForLine(rendered, renderedJump))
+    setRenderedJump(null)
+  }, [renderedJump, rendered, loading])
+
   const centre = useMemo(() => {
     if (showKeys) return keysCard(inner(diffWidth), ui)
     if (current?.type === 'overview') return overviewCard(review, inner(diffWidth), ui)
     if (current?.type === 'slice') return sliceCard(review, slice, reviewed, inner(diffWidth), ui)
     if (current?.type === 'drafts') return draftsCard(review, drafts, inner(diffWidth), ui)
-    return null
-  }, [showKeys, review, current, slice, drafts, reviewed, diffWidth, ui])
+    return rendered
+  }, [showKeys, review, current, slice, drafts, reviewed, diffWidth, ui, rendered])
 
   const draftAt = useMemo(() => {
     const index = new Map()
@@ -503,6 +536,7 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
 
   /** Write or edit the draft on the cursor's line; an empty body deletes it. */
   const commentOnCursor = async () => {
+    if (rendered) return setStatus({ tone: theme.risk.medium, text: 'Press m for the diff to comment on a line.' })
     const row = cellAt(view[cursor], side)
     if (!path || !row || !row.line) {
       return setStatus({ tone: theme.risk.medium, text: 'Put the cursor on a diff line first (↑/↓).' })
@@ -625,6 +659,7 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
   const selectFinding = (finding) => {
     const at = tree.findIndex((r) => r.type === 'file' && r.path === finding.path)
     pendingLine.current = finding.line ?? null
+    if (finding.line) setRenderedJump(finding.line)
     if (at >= 0) setTreeIndex(at)
     const within = findingsFor(review, finding.path).indexOf(finding)
     setFindingIndex(Math.max(0, within))
@@ -677,6 +712,19 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
   // The widest line in the file, so sideways scrolling stops at the end of the
   // content instead of running off into empty space.
   const widest = useMemo(() => rows.reduce((max, row) => Math.max(max, row.text?.length ?? 0), 0), [rows])
+  const toggleRendered = () => {
+    if (!canRender(file)) return
+    if (rendered) {
+      const line = lineAtRow(rendered, centreTop)
+      const at = line ? view.findIndex((row) => rowHasLine(row, line)) : -1
+      setRenderMarkdown(false)
+      setCursor(Math.max(0, at))
+    } else {
+      setRenderMarkdown(true)
+      setRenderedJump(cellAt(view[cursor], side)?.line ?? null)
+    }
+  }
+
   const scrollSide = (delta) =>
     setHOffset((x) => Math.max(0, Math.min(Math.max(0, widest - codeWidth + 2), x + delta * layout.hScrollStep)))
 
@@ -719,7 +767,8 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
     if (input === '1') return (setZoomed(false), setFocus('tree'))
     if (input === '2') return setFocus('diff')
     if (input === '3' && findingsVisible) return (setZoomed(false), setFocus('findings'))
-    if (input === 'v') return toggleSplit()
+    if (input === 'm') return toggleRendered()
+    if (input === 'v' && !rendered) return toggleSplit()
     // Uppercase, because h/l are already the diff's sideways scroll and split
     // view needs that more than unified does — half the width means twice the
     // reaching for the end of a line.
@@ -787,17 +836,27 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
         ? `DRAFT REVIEW${drafts.length ? ` (${drafts.length})` : ''}`
         : current?.type === 'slice'
           ? `SLICE ${current.sliceIndex + 1}/${review.slices.length}`
-          : [
-              path,
-              view.length ? `L${cellAt(view[cursor], side)?.line ?? '–'}` : '',
-              view.length ? `${centreTop + 1}-${Math.min(view.length, centreTop + bodyHeight)}/${view.length}` : '',
-              hOffset > 0 ? `→${hOffset}` : '',
-              split ? 'split' : '',
-              zoomed ? 'zoom' : '',
-              reviewed.has(path) ? 'read' : '',
-            ]
-              .filter(Boolean)
-              .join('  ')
+          : rendered
+            ? [
+                path,
+                'rendered',
+                `${centreTop + 1}-${Math.min(rendered.length, centreTop + bodyHeight)}/${rendered.length}`,
+                zoomed ? 'zoom' : '',
+                reviewed.has(path) ? 'read' : '',
+              ]
+                .filter(Boolean)
+                .join('  ')
+            : [
+                path,
+                view.length ? `L${cellAt(view[cursor], side)?.line ?? '–'}` : '',
+                view.length ? `${centreTop + 1}-${Math.min(view.length, centreTop + bodyHeight)}/${view.length}` : '',
+                hOffset > 0 ? `→${hOffset}` : '',
+                split ? 'split' : '',
+                zoomed ? 'zoom' : '',
+                reviewed.has(path) ? 'read' : '',
+              ]
+                .filter(Boolean)
+                .join('  ')
 
   /** The seam between hunks: a rule rather than a bare @@, so it spans the pane. */
   const hunkRow = (row, index) => {
@@ -909,9 +968,11 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
   // only place a side to choose exists.
   const KEYS = {
     tree: `[j/k] move  [[/]] slice  [x] read  [y] fix  [tab] pane  [n/p] finding${analyze ? '  [a] analyze' : ''}${reload ? '  [r] reload' : ''}  [?] keys  [q] quit`,
-    diff: split
-      ? '[j/k] line  [H/L] side  [h/l] scroll  [v] unified  [c] comment  [x] read  [s/A/R] submit  [?] keys'
-      : '[j/k] line  [h/l] scroll  [v] split  [z] zoom  [c] comment  [x] read  [s/A/R] submit  [?] keys',
+    diff: rendered
+      ? '[j/k] scroll  [m] diff  [z] zoom  [x] read  [n/p] finding  [s/A/R] submit  [?] keys'
+      : split
+        ? '[j/k] line  [H/L] side  [h/l] scroll  [v] unified  [c] comment  [x] read  [s/A/R] submit  [?] keys'
+        : '[j/k] line  [h/l] scroll  [v] split  [z] zoom  [c] comment  [x] read  [s/A/R] submit  [?] keys',
     findings: '[j/k] scroll  [n/p] finding  [c] comment  [y] fix  [x] read  [tab] pane  [?] keys  [q] quit',
   }
 
