@@ -16,6 +16,7 @@ import { resolveProvider } from '../src/pipeline/providers/index.mjs'
 import { extractJson, limitNotice } from '../src/pipeline/reply.mjs'
 import { watchDirs } from '../src/pipeline/watch.mjs'
 import { runViewer } from '../src/viewer/app.mjs'
+import { runDocument } from '../src/viewer/document.mjs'
 
 const require = createRequire(import.meta.url)
 const { version: VERSION } = require('../package.json')
@@ -31,6 +32,7 @@ Usage:
   slice my-branch    review that branch's PR, or diff the branch if it has none
   slice --branch     review the local branch diff, ignoring any open PR
   slice -w           review what you have not committed yet
+  slice README.md    read a markdown file, rendered; no git, gh, or model needed
 
   By default this just opens the diff in the viewer — no model runs. Pass
   --ai, or press a in the viewer, for the AI-analyzed review: slices, a
@@ -185,6 +187,21 @@ function parseArgs(argv) {
     // matters once we know whether a PR came back.
     else options.ref = arg
   }
+  if (options.ref && /\.(md|markdown)$/i.test(options.ref)) {
+    const conflicting = [
+      options.analyze && '--ai',
+      options.prompt && '--prompt',
+      options.refresh && '--refresh',
+      options.branch && '--branch',
+      options.wip && '--wip',
+      options.base && '--base',
+      options.open && '--open',
+    ].filter(Boolean)
+    if (conflicting.length > 0) fail(`${conflicting[0]} reviews a diff, so it cannot be used with ${options.ref}`)
+    options.document = options.ref
+    options.ref = null
+  }
+
   // Asking to redo the analysis, or to say something to it, implies wanting it
   // in the first place — otherwise either flag with no --ai silently does
   // nothing.
@@ -698,6 +715,20 @@ async function main() {
   })
 
   if (options.printConfig) return printConfig({ config, sources })
+
+  if (options.document) {
+    let text
+    try {
+      text = readFileSync(options.document, 'utf8')
+    } catch (error) {
+      fail(
+        error.code === 'ENOENT'
+          ? `no such file: ${options.document}`
+          : `cannot read ${options.document}: ${error.message}`,
+      )
+    }
+    return runDocument({ path: options.document, text, repoRoot: cwd, config, warnings: configWarnings })
+  }
 
   if (options.open) {
     if (!existsSync(options.open)) fail(`no such review file: ${options.open}`)
