@@ -3,14 +3,7 @@ import { Box, Text, render, useApp, useInput, useStdout } from 'ink'
 
 import { Scrollbar } from './app.mjs'
 import { codeHighlighter, resolveSyntaxTheme } from './render.mjs'
-import {
-  markdownLines,
-  segmentsWidth,
-  setCodeHighlighter,
-  setMarkdownTheme,
-  sliceSegments,
-  stripFrontmatter,
-} from './markdown.mjs'
+import { documentLines, segmentsWidth, setCodeHighlighter, setMarkdownTheme, sliceSegments } from './markdown.mjs'
 import { parseHex } from '../config/color.mjs'
 import { queryColors } from './terminal.mjs'
 import { viewerConfig } from './theme.mjs'
@@ -20,7 +13,7 @@ const CHROME_ROWS = 2
 const H_SCROLL_STEP = 8
 
 export const plainDocument = (text, width) =>
-  markdownLines(stripFrontmatter(text), width)
+  documentLines(text, width)
     .map((line) =>
       line
         .map((segment) => segment.text)
@@ -67,7 +60,7 @@ function DocumentView({ path, text, ui }) {
 
   const width = Math.max(20, Math.min(size.cols - 3, MAX_WIDTH))
   const height = Math.max(1, size.rows - CHROME_ROWS)
-  const lines = useMemo(() => markdownLines(stripFrontmatter(text), width), [text, width])
+  const lines = useMemo(() => documentLines(text, width), [text, width])
   const widest = useMemo(() => lines.reduce((most, line) => Math.max(most, segmentsWidth(line)), 0), [lines])
 
   const maxTop = Math.max(0, lines.length - height)

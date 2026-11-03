@@ -12,8 +12,36 @@
  */
 
 import { MarkdownExit } from 'markdown-exit'
+import stringWidth from 'string-width'
 
 const parser = new MarkdownExit()
+const documentParser = new MarkdownExit({ html: true })
+const CONTROL = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g
+const ASCII = /^[\x20-\x7e]*$/
+const TAB_WIDTH = 4
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+
+const clean = (text) => String(text ?? '').replace(CONTROL, '')
+const textWidth = (text) => (ASCII.test(text) ? text.length : stringWidth(text))
+
+const takeWidth = (text, limit) => {
+  let taken = ''
+  let width = 0
+  for (const { segment } of graphemes.segment(text)) {
+    const next = stringWidth(segment)
+    if (width + next > limit && taken) break
+    taken += segment
+    width += next
+  }
+  return [taken, text.slice(taken.length)]
+}
+
+const expandTabs = (line) => {
+  if (!line.includes('\t')) return line
+  let out = ''
+  for (const char of line) out += char === '\t' ? ' '.repeat(TAB_WIDTH - (out.length % TAB_WIDTH)) : char
+  return out
+}
 
 /**
  * Colours, replaced wholesale by the app once config is resolved.
@@ -39,7 +67,20 @@ export const setCodeHighlighter = (fn) => {
 }
 
 /** Total printable width of a line. */
-export const segmentsWidth = (segments) => segments.reduce((total, segment) => total + segment.text.length, 0)
+export const segmentsWidth = (segments) => segments.reduce((total, segment) => total + textWidth(segment.text), 0)
+
+function columnWindow(text, from, until) {
+  if (ASCII.test(text)) return text.slice(from, until)
+  let out = ''
+  let at = 0
+  for (const { segment } of graphemes.segment(text)) {
+    const next = stringWidth(segment)
+    if (at >= from && at + next <= until) out += segment
+    at += next
+    if (at >= until) break
+  }
+  return out
+}
 
 /**
  * Take the `[from, from + width)` column window of a line, keeping each
@@ -54,12 +95,9 @@ export function sliceSegments(segments, from, width) {
   let at = 0
 
   for (const segment of segments) {
-    const end = at + segment.text.length
+    const end = at + textWidth(segment.text)
     if (end > from && at < until) {
-      out.push({
-        ...segment,
-        text: segment.text.slice(Math.max(0, from - at), Math.min(segment.text.length, until - at)),
-      })
+      out.push({ ...segment, text: columnWindow(segment.text, Math.max(0, from - at), until - at) })
     }
     at = end
     if (at >= until) break
@@ -121,6 +159,8 @@ function inlineSegments(children, base) {
       case 'hardbreak':
         out.push({ ...style, text: '\n' })
         break
+      case 'html_inline':
+        break
       default:
         if (token.content) out.push({ ...style, text: token.content })
     }
@@ -131,7 +171,7 @@ function inlineSegments(children, base) {
 
 /** Split one line of markdown into styled segments. */
 export function parseInline(text, base = {}) {
-  const [inline] = parser.parseInline(String(text ?? ''), {})
+  const [inline] = parser.parseInline(clean(text), {})
   return inlineSegments(inline?.children ?? [], base)
 }
 
@@ -171,14 +211,16 @@ export function wrapSegments(segments, width, hanging = '') {
       }
 
       let word = part
-      while (word.length > inner) {
+      while (textWidth(word) > inner) {
         flush()
-        lines.push([{ ...segment, text: word.slice(0, inner) }])
-        word = word.slice(inner)
+        const [head, rest] = takeWidth(word, inner)
+        lines.push([{ ...segment, text: head }])
+        word = rest
       }
-      if (length + word.length > inner) flush()
+      const wordWidth = textWidth(word)
+      if (length + wordWidth > inner) flush()
       line.push({ ...segment, text: word })
-      length += word.length
+      length += wordWidth
     }
   }
   flush()
@@ -220,12 +262,16 @@ const closingIndex = (tokens, start) => {
 // about the code, so over-wide lines are left for the pane to truncate.
 function codeLines(token) {
   if (!token.content) return []
-  const code = token.content.replace(/\n$/, '')
+  const code = token.content.replace(/\n$/, '').split('\n').map(expandTabs).join('\n')
   const lang = token.info.trim().split(/\s+/)[0]
   const highlighted = highlightCode?.(code, lang)
-  return code.split('\n').map((raw, i) => {
+  const raws = code.split('\n')
+  const start = token.map[0] + (token.type === 'fence' ? 1 : 0)
+  return raws.map((raw, i) => {
     const segments = highlighted?.[i]?.length ? highlighted[i] : [{ text: raw, color: colors.fence }]
-    return [{ text: '│ ', dim: true }, ...segments]
+    const row = [{ text: '│ ', dim: true }, ...segments]
+    sources.set(row, [start + i, i === raws.length - 1 ? token.map[1] : start + i + 1])
+    return row
   })
 }
 
@@ -301,6 +347,21 @@ function tableLines(tokens, width, base) {
   return lines
 }
 
+const htmlText = (html) =>
+  html
+    .replace(/<!--[\s\S]*?(?:-->|$)/g, '')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+function takeTaskMarker(inner) {
+  const first = inner[1]?.children?.[0]
+  const task = first?.type === 'text' ? /^\[([ xX])\]\s+/.exec(first.content) : null
+  if (!task) return null
+  first.content = first.content.slice(task[0].length)
+  return task[1] === ' ' ? '☐ ' : '☑ '
+}
+
 function headingStyle(tag) {
   if (tag === 'h1') return { bold: true, underline: true, color: colors.heading }
   if (tag === 'h2') return { bold: true, color: colors.heading }
@@ -313,6 +374,7 @@ function blockLines(tokens, width, base, cursor) {
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i]
     if (!token.map) continue
+    if (token.type === 'html_block' && !htmlText(token.content)) continue
 
     if (token.map[0] > cursor.line) lines.push([])
     cursor.line = token.map[0]
@@ -340,7 +402,11 @@ function blockLines(tokens, width, base, cursor) {
         break
       case 'fence':
       case 'code_block':
-        lines.push(...withSource(codeLines(token), token.map))
+        lines.push(...codeLines(token))
+        cursor.line = token.map[1]
+        break
+      case 'html_block':
+        lines.push(...withSource(wrapSegments([{ ...base, text: htmlText(token.content) }], width), token.map))
         cursor.line = token.map[1]
         break
       case 'table_open':
@@ -352,7 +418,7 @@ function blockLines(tokens, width, base, cursor) {
         lines.push(...blockLines(inner, width, base, cursor))
         break
       case 'list_item_open': {
-        const marker = token.info ? `${token.info}. ` : '• '
+        const marker = takeTaskMarker(inner) ?? (token.info ? `${token.info}. ` : '• ')
         lines.push(...hanging(blockLines(inner, width - marker.length, base, cursor), marker))
         cursor.line = Math.max(cursor.line, token.map[0] + 1)
         break
@@ -379,8 +445,11 @@ function blockLines(tokens, width, base, cursor) {
  * against the pane width.
  */
 export function markdownLines(text, width) {
-  return blockLines(parser.parse(String(text ?? ''), {}), width, {}, { line: Infinity })
+  return blockLines(parser.parse(clean(text), {}), width, {}, { line: Infinity })
 }
+
+export const documentLines = (text, width) =>
+  blockLines(documentParser.parse(stripFrontmatter(clean(text)), {}), width, {}, { line: Infinity })
 
 /** Shift rendered lines right, e.g. to sit under a finding's title. */
 export const indentLines = (lines, by) =>
