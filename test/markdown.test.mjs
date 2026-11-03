@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import {
+  documentLines,
   markdownLines,
   padSegments,
   parseInline,
@@ -218,4 +219,68 @@ test('a long multi-line reference definition stays fast', () => {
 test('missing text renders as nothing', () => {
   assert.deepEqual(markdownLines(undefined, 40), [])
   assert.deepEqual(parseInline(null), [])
+})
+
+test('terminal control sequences never survive into a line', () => {
+  const dirty = 'safe \x1b[31mred\x1b]0;title\x07 \x9b2J'
+  const everything = [...markdownLines(dirty, 80), parseInline(dirty), ...documentLines(dirty, 80)]
+  for (const line of everything) assert.doesNotMatch(text(line), /[\x00-\x08\x0b-\x1f\x7f-\x9f]/)
+  const code = markdownLines('```\ncode\x1b[2J\n```', 80).map(text)
+  assert.deepEqual(code, ['│ code[2J'])
+})
+
+test('tabs in code become spaces so they cannot break the pane', () => {
+  assert.deepEqual(markdownLines('```\n\tx\ny\tz\n```', 40).map(text), ['│     x', '│ y   z'])
+})
+
+test('width counts terminal columns, not characters', () => {
+  assert.equal(segmentsWidth([{ text: 'こんにちは' }]), 10)
+  assert.equal(segmentsWidth([{ text: 'ab' }]), 2)
+})
+
+test('text without spaces wraps by column and loses nothing', () => {
+  const source = '日本語の段落です'.repeat(10)
+  const lines = wrapSegments([{ text: source }], 20)
+  assert.equal(lines.map(text).join(''), source)
+  for (const line of lines) assert.ok(segmentsWidth(line) <= 20, text(line))
+})
+
+test('wrapping never splits an emoji', () => {
+  const lines = wrapSegments([{ text: '🚀'.repeat(20) }], 9)
+  assert.equal(lines.map(text).join(''), '🚀'.repeat(20))
+  for (const line of lines)
+    assert.doesNotMatch(text(line), /[\ud800-\udfff](?![\udc00-\udfff])(?<![\ud800-\udbff][\udc00-\udfff])/)
+})
+
+test('a wide-character table stays aligned', () => {
+  const rows = markdownLines('| a | b |\n|---|---|\n| 日本語 | x |\n| y | z |', 40)
+  const bar = rows.map((row) =>
+    segmentsWidth(
+      row.slice(
+        0,
+        row.findIndex((s) => s.text.includes('│')),
+      ),
+    ),
+  )
+  assert.equal(new Set(bar.filter((n) => n > 0)).size, 1)
+})
+
+test('sideways scrolling windows wide characters by column', () => {
+  const segments = [{ text: 'ab日本語' }]
+  assert.equal(text(sliceSegments(segments, 2, 4)), '日本')
+  assert.equal(text(sliceSegments(segments, 0, 3)), 'ab')
+})
+
+test('a document hides comments and raw tags but keeps their text', () => {
+  const source =
+    '<!-- hidden -->\n\n<details>\n<summary>Who</summary>\n\nbody\n\n</details>\n\nraw <b>bold</b> <!-- no -->end'
+  assert.deepEqual(documentLines(source, 40).map(text), ['Who', '', 'body', '', 'raw bold end'])
+})
+
+test('generated text keeps tags, since it often names components', () => {
+  assert.deepEqual(markdownLines('The <Foo> component', 40).map(text), ['The <Foo> component'])
+})
+
+test('task lists use checkboxes', () => {
+  assert.deepEqual(markdownLines('- [x] done\n- [ ] todo\n- [link](u)', 40).map(text), ['☑ done', '☐ todo', '• link'])
 })
