@@ -234,7 +234,7 @@ const KEY_GROUPS = [
       ['s  A  R', 'submit as comment / approve / request changes'],
       ['y  Y', 'copy findings here, or all of them, as a fix prompt'],
       ['a', 'run the AI analysis in the background'],
-      ['r', 'reload the diff (-w)'],
+      ['r', 'reload the diff'],
     ],
   ],
   [

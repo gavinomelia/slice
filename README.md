@@ -81,7 +81,7 @@ Press `?` in slice to see every key. The essentials:
 | `s` `A` `R` | submit as comment / approve / request changes |
 | `y` `Y` | copy findings here, or all of them, as a fix prompt |
 | `a` | run the AI analysis in the background |
-| `r` | reload (`-w`; it also reloads on its own) |
+| `r` | reload the diff (`-w` also reloads on its own) |
 | drag | select text within one pane and copy it; shift-drag for the terminal's own selection |
 | `?` | show all keys |
 | `q` | quit |
