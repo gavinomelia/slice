@@ -3,14 +3,27 @@ import { readFile } from 'node:fs/promises'
 import { resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
 
-import { documentLines, sourceOf } from './markdown.mjs'
+import { documentLines, mermaidSources, sourceOf } from './markdown.mjs'
+import { renderDiagrams } from './mermaid.mjs'
 
 const exec = promisify(execFile)
 const MAX_BUFFER = 64 * 1024 * 1024
 const GUTTER = 2
+const GIT_TIMEOUT = 5000
+const GH_TIMEOUTS = [3000, 8000]
+const DIAGRAM_ONLY = /\.(mmd|mermaid)$/i
 const sourceLines = new WeakMap()
 
-export const canRender = (file) => Boolean(file) && /\.(md|markdown)$/i.test(file.path) && file.status !== 'deleted'
+export const canRender = (file) =>
+  Boolean(file) && /\.(md|markdown|mmd|mermaid)$/i.test(file.path) && file.status !== 'deleted'
+
+export const documentText = (path, text) => (DIAGRAM_ONLY.test(path) ? `\`\`\`mermaid\n${text}\n\`\`\`\n` : text)
+
+function run(command, args, options) {
+  const running = exec(command, args, { maxBuffer: MAX_BUFFER, ...options })
+  running.child.stdin?.end()
+  return running.then(({ stdout }) => stdout)
+}
 
 export function addedFileText(patch) {
   const lines = []
@@ -31,27 +44,29 @@ async function readWorktreeFile(repoRoot, path) {
 }
 
 async function gitShow(repoRoot, sha, path) {
-  const { stdout } = await exec('git', ['show', `${sha}:${path}`], { cwd: repoRoot, maxBuffer: MAX_BUFFER })
-  return stdout
+  return run('git', ['show', `${sha}:${path}`], { cwd: repoRoot, timeout: GIT_TIMEOUT })
 }
 
-async function ghContents(repoRoot, repo, sha, path) {
+async function ghContents(repoRoot, repo, sha, path, timeouts = GH_TIMEOUTS) {
   const encoded = path.split('/').map(encodeURIComponent).join('/')
-  const { stdout } = await exec(
-    'gh',
-    ['api', `repos/${repo}/contents/${encoded}?ref=${sha}`, '-H', 'Accept: application/vnd.github.raw'],
-    { cwd: repoRoot, maxBuffer: MAX_BUFFER },
-  )
-  return stdout
+  const args = ['api', `repos/${repo}/contents/${encoded}?ref=${sha}`, '-H', 'Accept: application/vnd.github.raw']
+  for (const [i, timeout] of timeouts.entries()) {
+    try {
+      return await run('gh', args, { cwd: repoRoot, timeout })
+    } catch (error) {
+      if (!error.killed || i === timeouts.length - 1) throw error
+    }
+  }
+  return null
 }
 
-export async function loadFileText({ file, target, repoRoot }) {
+export async function loadFileText({ file, target, repoRoot, ghTimeouts }) {
   const attempts = []
   if (target?.kind === 'worktree') attempts.push(() => readWorktreeFile(repoRoot, file.path))
   if (file.status === 'added') attempts.push(async () => addedFileText(file.patch))
   if (target?.headSha) {
     attempts.push(() => gitShow(repoRoot, target.headSha, file.path))
-    if (target.repo) attempts.push(() => ghContents(repoRoot, target.repo, target.headSha, file.path))
+    if (target.repo) attempts.push(() => ghContents(repoRoot, target.repo, target.headSha, file.path, ghTimeouts))
   }
 
   for (const attempt of attempts) {
@@ -63,6 +78,25 @@ export async function loadFileText({ file, target, repoRoot }) {
     }
   }
   return null
+}
+
+const documents = new Map()
+
+export function loadDocument({ file, target, repoRoot }) {
+  const key = [target?.headSha, file.path, file.patch].join('\0')
+  if (documents.has(key)) return documents.get(key)
+
+  const loading = (async () => {
+    const raw = await loadFileText({ file, target, repoRoot })
+    if (raw == null) {
+      documents.delete(key)
+      return { value: null, diagrams: new Map() }
+    }
+    const value = documentText(file.path, raw)
+    return { value, diagrams: await renderDiagrams(mermaidSources(value)) }
+  })()
+  documents.set(key, loading)
+  return loading
 }
 
 function changedLines(rows) {
@@ -108,7 +142,7 @@ function isAdded(source, added) {
   return false
 }
 
-export function renderedLines(text, rows, width, theme) {
+export function renderedLines(text, rows, width, theme, diagrams) {
   const changes = changedLines(rows)
   const marks = {
     add: { text: '▌ ', color: theme.diff.addMark },
@@ -116,7 +150,7 @@ export function renderedLines(text, rows, width, theme) {
   }
   const blank = { text: ' '.repeat(GUTTER) }
 
-  const lines = documentLines(text, width - GUTTER)
+  const lines = documentLines(text, width - GUTTER, diagrams)
   const removed = removalRows(lines, changes.removedAt)
 
   return lines.map((line) => {

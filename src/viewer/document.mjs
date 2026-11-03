@@ -3,7 +3,16 @@ import { Box, Text, render, useApp, useInput, useStdout } from 'ink'
 
 import { Scrollbar } from './app.mjs'
 import { codeHighlighter, resolveSyntaxTheme } from './render.mjs'
-import { documentLines, segmentsWidth, setCodeHighlighter, setMarkdownTheme, sliceSegments } from './markdown.mjs'
+import {
+  documentLines,
+  mermaidSources,
+  segmentsWidth,
+  setCodeHighlighter,
+  setMarkdownTheme,
+  sliceSegments,
+} from './markdown.mjs'
+import { renderDiagrams } from './mermaid.mjs'
+import { documentText } from './rendered.mjs'
 import { parseHex } from '../config/color.mjs'
 import { queryColors } from './terminal.mjs'
 import { viewerConfig } from './theme.mjs'
@@ -12,8 +21,8 @@ const MAX_WIDTH = 100
 const CHROME_ROWS = 2
 const H_SCROLL_STEP = 8
 
-export const plainDocument = (text, width) =>
-  documentLines(text, width)
+export const plainDocument = (text, width, diagrams) =>
+  documentLines(text, width, diagrams)
     .map((line) =>
       line
         .map((segment) => segment.text)
@@ -46,7 +55,7 @@ const DocumentLine = ({ line, width }) =>
         ),
   )
 
-function DocumentView({ path, text, ui }) {
+function DocumentView({ path, text, diagrams, ui }) {
   const { exit } = useApp()
   const { stdout } = useStdout()
   const { theme } = ui
@@ -60,7 +69,7 @@ function DocumentView({ path, text, ui }) {
 
   const width = Math.max(20, Math.min(size.cols - 3, MAX_WIDTH))
   const height = Math.max(1, size.rows - CHROME_ROWS)
-  const lines = useMemo(() => documentLines(text, width), [text, width])
+  const lines = useMemo(() => documentLines(text, width, diagrams), [text, width, diagrams])
   const widest = useMemo(() => lines.reduce((most, line) => Math.max(most, segmentsWidth(line)), 0), [lines])
 
   const maxTop = Math.max(0, lines.length - height)
@@ -129,9 +138,12 @@ function DocumentView({ path, text, ui }) {
   )
 }
 
-export async function runDocument({ path, text, repoRoot = process.cwd(), config = null, warnings = [] }) {
+export async function runDocument({ path, text: raw, repoRoot = process.cwd(), config = null, warnings = [] }) {
+  const text = documentText(path, raw)
+  const diagrams = await renderDiagrams(mermaidSources(text))
+
   if (!process.stdout.isTTY || !process.stdin.isTTY) {
-    console.log(plainDocument(text, process.stdout.columns || 80))
+    console.log(plainDocument(text, process.stdout.columns || 80, diagrams))
     return
   }
 
@@ -144,7 +156,7 @@ export async function runDocument({ path, text, repoRoot = process.cwd(), config
 
   process.stdout.write('\x1b[?1049h')
   try {
-    const instance = render(h(DocumentView, { path, text, ui }), { exitOnCtrlC: false })
+    const instance = render(h(DocumentView, { path, text, diagrams, ui }), { exitOnCtrlC: false })
     await instance.waitUntilExit()
   } finally {
     process.stdout.write('\x1b[?1049l')

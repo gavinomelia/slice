@@ -74,3 +74,19 @@ test('the top two heading levels stand out from the rest', () => {
     setMarkdownTheme({ heading: undefined })
   }
 })
+
+test('a mermaid file on its own is drawn', () => {
+  writeFileSync(join(dir, 'flow.mmd'), 'flowchart LR\n  A[Start] --> B[End]\n')
+  const result = slice('flow.mmd')
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /Start/)
+  assert.match(result.stdout, /┌/)
+  assert.doesNotMatch(result.stdout, /flowchart/)
+})
+
+test('a markdown file draws the diagrams inside it', () => {
+  writeFileSync(join(dir, 'with.md'), '# Doc\n\n```mermaid\nsequenceDiagram\n  A->>B: hello\n```\n')
+  const result = slice('with.md')
+  assert.match(result.stdout, /hello/)
+  assert.doesNotMatch(result.stdout, /sequenceDiagram/)
+})
