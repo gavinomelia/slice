@@ -9,6 +9,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { MOUSE_OFF, MOUSE_ON } from './terminal.mjs'
+
 export const draftsPathFor = (reviewPath) => reviewPath.replace(/\.review\.json$/, '.drafts.json')
 
 export function loadDrafts(reviewPath) {
@@ -77,7 +79,7 @@ export async function composeInEditor({ seed, hint, context = [], redraw, onEmpt
   const [bin, ...args] = command.split(/\s+/)
 
   const wasRaw = process.stdin.isRaw
-  process.stdout.write('\x1b[?1049l\x1b[?25h')
+  process.stdout.write(`${MOUSE_OFF}\x1b[?1049l\x1b[?25h`)
   if (wasRaw) process.stdin.setRawMode(false)
   process.stdin.pause()
 
@@ -90,7 +92,7 @@ export async function composeInEditor({ seed, hint, context = [], redraw, onEmpt
     // Back to our own screen with the cursor hidden again. Ink will not do it:
     // it hides once and latches, so having shown the cursor for the editor we
     // now own putting it back.
-    process.stdout.write('\x1b[?1049h\x1b[?25l')
+    process.stdout.write(`\x1b[?1049h\x1b[?25l${MOUSE_ON}`)
     redraw?.()
   }
 

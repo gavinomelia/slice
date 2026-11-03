@@ -16,14 +16,17 @@ import { padSegments, plain, segmentsWidth, setCodeHighlighter, setMarkdownTheme
 import { draftsCard, findingLines, findingsFor, keysCard, overviewCard, severityGlyphs, sliceCard } from './cards.mjs'
 import { composeInEditor, loadDrafts, saveDrafts, seedFromFinding } from './compose.mjs'
 import { partitionDrafts, postReview } from './github.mjs'
-import { handOff } from './handoff.mjs'
+import { copyToClipboard, handOff } from './handoff.mjs'
+import { isEmptySelection, markRange, parseMouse, rangeOn, selectedText } from './selection.mjs'
 import { buildTree, cellAt, draftKey, rowHasLine, sideAt, windowFor } from './tree.mjs'
 import { loadReviewed, nextUnreviewed, pathsForRow, saveReviewed, sliceReviewed, toggleReviewed } from './progress.mjs'
 import { parseHex } from '../config/color.mjs'
-import { queryColors } from './terminal.mjs'
+import { MOUSE_OFF, MOUSE_ON, queryColors } from './terminal.mjs'
 import { viewerConfig } from './theme.mjs'
 
 const PANES = ['tree', 'diff', 'findings']
+const BODY_TOP = 5
+const GUTTER = 8
 
 /**
  * A one-column scrollbar down the right edge of a pane.
@@ -88,14 +91,14 @@ function Pane({ title, number, focused, width, theme, total, top, height, childr
   )
 }
 
-const Lines = ({ lines, top, height }) =>
+const Lines = ({ lines, top, height, rangeAt }) =>
   lines.slice(top, top + height).map((line, i) =>
     h(
       Text,
       { key: top + i, wrap: 'truncate' },
       line.length === 0
         ? ' '
-        : line.map((segment, j) =>
+        : (rangeAt?.(top + i) ? markRange(line, ...rangeAt(top + i)) : line).map((segment, j) =>
             h(
               Text,
               {
@@ -106,6 +109,7 @@ const Lines = ({ lines, top, height }) =>
                 dimColor: segment.dim,
                 italic: segment.italic,
                 underline: segment.underline,
+                inverse: segment.selected,
               },
               segment.text,
             ),
@@ -154,6 +158,14 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
   // default: the right-hand side is the code that will exist after the merge,
   // and that is what a review comment is usually about.
   const [side, setSide] = useState('right')
+  const [selection, setSelection] = useState(null)
+  const selectionRef = useRef(null)
+  const select = (next) => {
+    selectionRef.current = next
+    setSelection(next)
+  }
+  const [dragEdge, setDragEdge] = useState(0)
+  const dragTick = useRef(null)
 
   /**
    * A status message sits where the shortcut line goes, so it has to give it
@@ -621,6 +633,17 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
     setFindScroll(foundStarts.current[active] ?? 0)
   }, [active, findings])
 
+  useEffect(() => {
+    select(null)
+    setDragEdge(0)
+  }, [view, centre, found])
+
+  useEffect(() => {
+    if (!dragEdge) return
+    const timer = setInterval(() => dragTick.current(dragEdge), 60)
+    return () => clearInterval(timer)
+  }, [dragEdge])
+
   const selectFinding = (finding) => {
     const at = tree.findIndex((r) => r.type === 'file' && r.path === finding.path)
     pendingLine.current = finding.line ?? null
@@ -684,6 +707,8 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
   // input into characters; escape sequences come through `key` and are passed
   // straight down.
   useInput((input, key) => {
+    const mouse = parseMouse(input)
+    if (mouse) return handleMouse(mouse)
     if (input.length > 1 && !key.ctrl && !key.meta && !/[^\x20-\x7e]/.test(input)) {
       for (const char of input) handleKey(char, key)
       return
@@ -691,7 +716,101 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
     handleKey(input, key)
   })
 
+  const panes = () => {
+    const diffLeft = zoomed ? 1 : treeWidth + 1
+    return [
+      ...(zoomed ? [] : [{ name: 'tree', left: 1, width: treeWidth }]),
+      { name: 'diff', left: diffLeft, width: diffWidth },
+      ...(findingsVisible ? [{ name: 'findings', left: diffLeft + diffWidth, width: findWidth }] : []),
+    ]
+  }
+
+  const paneTop = (name) => (name === 'findings' ? foundTop : centreTop)
+  const paneTotal = (name) => (name === 'findings' ? found.lines.length : centre ? centre.length : view.length)
+
+  const textAt =
+    ({ pane, side: column }) =>
+    (line) => {
+      const card = pane === 'findings' ? found.lines : centre
+      if (card) return card[line]?.map((segment) => segment.text).join('') ?? null
+      const row = view[line]
+      if (!row || row.kind === 'hunk') return null
+      return row.kind === 'pair' ? (row[column]?.text ?? null) : row.text
+    }
+
+  const pointAt = ({ pane: name, side: column }, x, y) => {
+    const pane = panes().find((p) => p.name === name)
+    const isCode = name === 'diff' && !centre
+    const start = pane.left + 2 + (isCode ? GUTTER + (column === 'right' ? codeWidth + GUTTER + 1 : 0) : 0)
+    const width = isCode ? codeWidth : inner(pane.width)
+    const top = paneTop(name)
+    const line = Math.max(0, Math.min(paneTotal(name) - 1, top + Math.max(0, Math.min(bodyHeight - 1, y - BODY_TOP))))
+    if (x >= start + width - 1) return { line, col: Infinity }
+    return { line, col: x < start ? 0 : x - start + (isCode ? hOffset : 0) }
+  }
+
+  const copySelection = (chosen) => {
+    const text = selectedText(chosen, textAt(chosen))
+    if (!text) return
+    if (!copyToClipboard(text)) {
+      return setStatus({
+        tone: theme.risk.medium,
+        text: "No clipboard tool found (pbcopy/wl-copy/xclip). Shift-drag uses the terminal's own selection.",
+        ms: 6000,
+      })
+    }
+    const count = text.split('\n').length
+    setStatus({ tone: theme.ui.draft, text: `Copied ${count} line${count === 1 ? '' : 's'}.` })
+  }
+
+  dragTick.current = (direction) => {
+    const chosen = selectionRef.current
+    if (!chosen) return
+    const top = paneTop(chosen.pane)
+    const total = paneTotal(chosen.pane)
+    const next = Math.max(0, Math.min(Math.max(0, total - bodyHeight), top + direction))
+    if (next === top) return
+    if (chosen.pane === 'findings') setFindScroll(next)
+    else if (centre) setScroll(next)
+    else setCursor(next + Math.floor(bodyHeight / 2))
+    const line = direction < 0 ? next : Math.min(total - 1, next + bodyHeight - 1)
+    select({ ...chosen, head: { ...chosen.head, line } })
+  }
+
+  function handleMouse({ type, x, y, delta }) {
+    if (type === 'wheel') return moveIn(delta)
+
+    if (type === 'press') {
+      select(null)
+      setDragEdge(0)
+      const pane = panes().find((p) => x >= p.left && x < p.left + p.width)
+      if (!pane) return
+      setFocus(pane.name)
+      const inBody = y >= BODY_TOP && y < BODY_TOP + bodyHeight
+      if (pane.name === 'tree' || !inBody || paneTotal(pane.name) === 0) return
+      const divider = pane.left + 2 + codeWidth + GUTTER
+      const column = pane.name === 'diff' && !centre && split ? (x > divider ? 'right' : 'left') : null
+      const point = pointAt({ pane: pane.name, side: column }, x, y)
+      return select({ pane: pane.name, side: column, anchor: point, head: point })
+    }
+
+    const chosen = selectionRef.current
+    if (!chosen) return
+
+    if (type === 'drag') {
+      setDragEdge(y < BODY_TOP ? -1 : y >= BODY_TOP + bodyHeight ? 1 : 0)
+      return select({ ...chosen, head: pointAt(chosen, x, y) })
+    }
+
+    if (type === 'release') {
+      setDragEdge(0)
+      if (isEmptySelection(chosen)) return select(null)
+      copySelection(chosen)
+    }
+  }
+
   function handleKey(input, key) {
+    if (selectionRef.current) select(null)
     // Escape used to quit, sharing that with `q`. It is the key people press to
     // back out of something, and here it threw away a session with unposted
     // drafts in it — so it dismisses the status line and nothing more.
@@ -821,7 +940,7 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
    * — that is what an insert or a delete looks like side by side — and the
    * emptiness is the information.
    */
-  const diffCell = (row, { line, selected, prefix }) => {
+  const diffCell = (row, { line, selected, prefix, range }) => {
     if (!row) return [h(Text, { key: `${prefix}gap` }, ' '.repeat(codeWidth + 8))]
 
     const drafted = row.line && draftAt.has(draftKey(path, row.kind === 'del' ? 'deletions' : 'additions', row.line))
@@ -834,13 +953,16 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
       ...segment,
       bg: segment.word ? wordBg : lineBg,
     }))
-    const code = padSegments(
+    const padded = padSegments(
       clipped ? [...visible, { text: '›', color: theme.ui.muted, bg: lineBg }] : visible,
       codeWidth,
       {
         bg: lineBg,
       },
     )
+    const code = range
+      ? markRange(padded, range[0] - hOffset, Math.min(range[1], segmentsWidth(row.segments)) - hOffset)
+      : padded
 
     return [
       h(
@@ -864,10 +986,17 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
         row.kind === 'add' ? '+' : row.kind === 'del' ? '-' : ' ',
       ),
       ...code.map((segment, j) =>
-        h(Text, { key: `${prefix}${j}`, color: segment.color, backgroundColor: segment.bg }, segment.text),
+        h(
+          Text,
+          { key: `${prefix}${j}`, color: segment.color, backgroundColor: segment.bg, inverse: segment.selected },
+          segment.text,
+        ),
       ),
     ]
   }
+
+  const rangeIn = (pane, index, column = null) =>
+    selection?.pane === pane && selection.side === column ? rangeOn(selection, index) : null
 
   const diffRow = (row, index) =>
     row.kind === 'hunk'
@@ -875,7 +1004,7 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
       : h(
           Text,
           { key: index, wrap: 'truncate' },
-          ...diffCell(row, { line: row.line, selected: index === cursor, prefix: 'u' }),
+          ...diffCell(row, { line: row.line, selected: index === cursor, prefix: 'u', range: rangeIn('diff', index) }),
         )
 
   /** A pair drawn as two columns, old on the left and new on the right. */
@@ -890,9 +1019,19 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
     return h(
       Text,
       { key: index, wrap: 'truncate' },
-      ...diffCell(row.left, { line: leftLine, selected: selected === 'left', prefix: 'l' }),
+      ...diffCell(row.left, {
+        line: leftLine,
+        selected: selected === 'left',
+        prefix: 'l',
+        range: rangeIn('diff', index, 'left'),
+      }),
       h(Text, { color: theme.ui.border, dimColor: true }, '│'),
-      ...diffCell(row.right, { line: row.right?.line, selected: selected === 'right', prefix: 'r' }),
+      ...diffCell(row.right, {
+        line: row.right?.line,
+        selected: selected === 'right',
+        prefix: 'r',
+        range: rangeIn('diff', index, 'right'),
+      }),
     )
   }
 
@@ -1056,7 +1195,7 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
           height: bodyHeight,
         },
         centre
-          ? h(Lines, { lines: centre, top: centreTop, height: bodyHeight })
+          ? h(Lines, { lines: centre, top: centreTop, height: bodyHeight, rangeAt: (at) => rangeIn('diff', at) })
           : loading
             ? h(Text, { color: theme.ui.muted }, 'highlighting…')
             : view
@@ -1078,7 +1217,12 @@ function App({ review: initialReview, reviewPath, repoRoot, ink, ui, analysisPro
               top: foundTop,
               height: bodyHeight,
             },
-            h(Lines, { lines: found.lines, top: foundTop, height: bodyHeight }),
+            h(Lines, {
+              lines: found.lines,
+              top: foundTop,
+              height: bodyHeight,
+              rangeAt: (at) => rangeIn('findings', at),
+            }),
           ),
     ),
 
@@ -1142,7 +1286,7 @@ export async function runViewer({
   setCodeHighlighter(await codeHighlighter(ui.syntax))
 
   // Alternate screen buffer, so quitting restores the shell's scrollback.
-  process.stdout.write('\x1b[?1049h')
+  process.stdout.write(`\x1b[?1049h${MOUSE_ON}`)
 
   // The holder exists so the app can force a full repaint after $EDITOR has
   // drawn over the screen — only the render instance can do that, and it does
@@ -1156,6 +1300,6 @@ export async function runViewer({
   } finally {
     // Leaving the alternate screen has to happen even if the render threw, or
     // the shell is left drawing over a frozen copy of the UI.
-    process.stdout.write('\x1b[?1049l')
+    process.stdout.write(`${MOUSE_OFF}\x1b[?1049l`)
   }
 }
