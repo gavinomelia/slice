@@ -163,3 +163,7 @@ MIT
 Diff parsing and syntax highlighting come from
 [`@pierre/diffs`](https://www.npmjs.com/package/@pierre/diffs) by Pierre Computer
 Company, used under the Apache License 2.0.
+
+Markdown parsing comes from
+[`markdown-exit`](https://www.npmjs.com/package/markdown-exit), used under the MIT
+License.

@@ -109,6 +109,7 @@ const Lines = ({ lines, top, height, rangeAt }) =>
                 dimColor: segment.dim,
                 italic: segment.italic,
                 underline: segment.underline,
+                strikethrough: segment.strikethrough,
                 inverse: segment.selected,
               },
               segment.text,
