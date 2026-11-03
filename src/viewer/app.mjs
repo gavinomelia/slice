@@ -35,7 +35,7 @@ const GUTTER = 8
  * screen that says how much of anything you are looking at. It renders nothing
  * when the content fits, so a short pane stays clean.
  */
-function Scrollbar({ total, top, height, theme }) {
+export function Scrollbar({ total, top, height, theme }) {
   if (total <= height || height <= 0) return h(Box, { width: 1, flexShrink: 0 })
 
   const size = Math.max(1, Math.round((height * height) / total))
