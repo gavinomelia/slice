@@ -173,9 +173,10 @@ MIT
 
 ## Credits
 
-Diff parsing and syntax highlighting come from
-[`@pierre/diffs`](https://www.npmjs.com/package/@pierre/diffs) by Pierre Computer
-Company, used under the Apache License 2.0.
+Diff parsing comes from [`@pierre/diffs`](https://www.npmjs.com/package/@pierre/diffs)
+and syntax highlighting from
+[`@pierre/highlights`](https://www.npmjs.com/package/@pierre/highlights), both by
+Pierre Computer Company and used under the Apache License 2.0.
 
 Markdown parsing comes from
 [`markdown-exit`](https://www.npmjs.com/package/markdown-exit), and Mermaid drawing from
