@@ -6,8 +6,8 @@
  * - Palette names (`cyan`, `gray`) resolve to whatever the user's terminal
  *   theme says they are, so chrome blends into their setup.
  * - Hex values are used where the exact shade matters — diff backgrounds have
- *   to be dark enough to sit under Shiki's foreground colours without drowning
- *   them, and no palette slot guarantees that.
+ *   to be dark enough to sit under the syntax theme's foreground colours
+ *   without drowning them, and no palette slot guarantees that.
  *
  * Chalk downsamples hex for terminals without truecolour, so both are safe.
  */

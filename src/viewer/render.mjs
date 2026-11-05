@@ -3,7 +3,7 @@
  *
  * @pierre/diffs' components are web components, but everything under them is
  * headless: getSingularPatch parses, renderDiffWithHighlighter returns hast
- * with Shiki's hex colors inline. This walks that hast into the same
+ * with Highlights' hex colors inline. This walks that hast into the same
  * `{ text, color }` segment shape the markdown renderer uses, so the terminal
  * and the browser render from the exact same tokens.
  *
@@ -20,6 +20,8 @@ import {
   getSingularPatch,
   renderDiffWithHighlighter,
 } from '@pierre/diffs'
+
+import { isSupportedLanguage } from '@pierre/highlights'
 
 import { terminalColor } from './ansi.mjs'
 import { clean } from './markdown.mjs'
@@ -87,52 +89,25 @@ function lineToSegments(node, tabWidth) {
 
 const segmentsToText = (segments) => segments.map((segment) => segment.text).join('')
 
-/** Shared across files; passing `langs` loads incrementally into the same instance. */
-export function highlighter(lang, theme = DEFAULT_THEMES.dark) {
-  return getSharedHighlighter({ langs: lang ? [lang] : [], themes: [theme] })
-}
+const HIGHLIGHTER = 'highlights'
 
-/** Languages worth having warm for fenced blocks inside a finding's `fix`. */
-const FIX_LANGS = [
-  'ruby',
-  'javascript',
-  'typescript',
-  'erb',
-  'html',
-  'css',
-  'scss',
-  'json',
-  'yaml',
-  'shellscript',
-  'sql',
-  'diff',
-]
+export function highlighter(theme = DEFAULT_THEMES.dark) {
+  return getSharedHighlighter({ langs: [], themes: [theme], preferredHighlighter: HIGHLIGHTER })
+}
 
 /**
  * A synchronous `(code, lang) => Segment[][]` for the markdown renderer.
  *
- * Loading is done up front because markdown rendering happens inside a
- * useMemo — there is nowhere to await. Languages are loaded one at a time so
- * one unsupported id doesn't take the whole set down with it.
+ * The theme is resolved up front because markdown rendering happens inside a
+ * useMemo — there is nowhere to await.
  */
 export async function codeHighlighter(theme = DEFAULT_THEMES.dark) {
-  const hl = await getSharedHighlighter({ langs: [], themes: [theme] })
-
-  for (const lang of FIX_LANGS) {
-    try {
-      await hl.loadLanguage(lang)
-    } catch {
-      // Not bundled in this Shiki build; blocks in it fall back to plain.
-    }
-  }
-
-  const loaded = new Set(hl.getLoadedLanguages())
+  const hl = await highlighter(theme)
 
   return (code, lang) => {
-    const use = loaded.has(lang) ? lang : null
-    if (!use) return null
+    if (!lang || !isSupportedLanguage(lang)) return null
     try {
-      const { tokens } = hl.codeToTokens(code, { lang: use, theme })
+      const { tokens } = hl.codeToTokens(code, { lang, theme })
       return tokens.map((line) => line.map((token) => ({ text: token.content, color: terminalColor(token.color) })))
     } catch {
       return null
@@ -143,14 +118,14 @@ export async function codeHighlighter(theme = DEFAULT_THEMES.dark) {
 /**
  * Resolve a configured syntax theme, falling back rather than failing.
  *
- * A typo in a theme name should cost you the theme, not the review — Shiki
+ * A typo in a theme name should cost you the theme, not the review — the highlighter
  * throws on an unknown id, and there is nothing useful to do with that
  * exception three panes deep in a render.
  */
 export async function resolveSyntaxTheme(name) {
   const wanted = name ?? DEFAULT_THEMES.dark
   try {
-    await getSharedHighlighter({ langs: [], themes: [wanted] })
+    await highlighter(wanted)
     return wanted
   } catch {
     return DEFAULT_THEMES.dark
@@ -171,13 +146,7 @@ export async function buildRows(file, { theme = DEFAULT_THEMES.dark, tabWidth = 
 
   // An unknown extension is not fatal: renderDiffWithHighlighter falls back to
   // plain text, which still gives correct gutters and add/del tints.
-  let hl
-  try {
-    hl = await highlighter(diff.lang, theme)
-  } catch {
-    hl = await highlighter(null, theme)
-    diff.lang = undefined
-  }
+  const hl = await highlighter(theme)
 
   const { code } = renderDiffWithHighlighter(diff, hl, {
     theme,

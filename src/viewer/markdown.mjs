@@ -57,9 +57,9 @@ export const setMarkdownTheme = (next) => {
 }
 
 /**
- * Set by the app once Shiki is warm. `(code, lang) => Segment[][] | null`, one
+ * Set by the app once Highlights is warm. `(code, lang) => Segment[][] | null`, one
  * entry per line. A hook rather than an import, so this module stays pure and
- * a fenced block still renders if Shiki never loads.
+ * a fenced block still renders if Highlights never loads.
  */
 let highlightCode = null
 export const setCodeHighlighter = (fn) => {

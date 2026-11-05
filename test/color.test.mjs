@@ -88,7 +88,7 @@ for (const [name, bg] of Object.entries(omarchy)) {
 }
 
 test('the ansi syntax theme only ever hands out palette names', () => {
-  const colors = new Set(ANSI_THEME.tokenColors.map((rule) => terminalColor(rule.settings.foreground)))
+  const colors = new Set(Object.values(ANSI_THEME.style.syntax).map((style) => terminalColor(style.color)))
   for (const color of colors) assert.ok(color === undefined || /^[a-z]+$/.test(color), String(color))
   assert.equal(terminalColor('#A00004'), 'blue')
   assert.equal(terminalColor('#3fb950'), '#3fb950', 'a real hex from another theme passes through')

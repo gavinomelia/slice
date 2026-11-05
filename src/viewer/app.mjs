@@ -1389,7 +1389,7 @@ export async function runViewer({
   ui.syntax = await resolveSyntaxTheme(ui.theme.syntax)
   setMarkdownTheme(ui.theme.markdown)
 
-  // Warm Shiki before first paint: markdown renders inside a useMemo, so there
+  // Warm the highlighter before first paint: markdown renders inside a useMemo, so there
   // is no opportunity to await a highlighter once the app is running.
   setCodeHighlighter(await codeHighlighter(ui.syntax))
 
